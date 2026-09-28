@@ -1,0 +1,229 @@
+# Codified rules for the Data Table catalogue sheet.
+#
+# Source of record: data/ded/data_catalogue/B.1.2 Data Table Guidelines.xlsx
+# The `guideline` block below lets the QC script verify this spec has not
+# drifted from that workbook. Rules marked `todo:` need a decision before the
+# corresponding check can run; the script reports them as "not checked".
+
+guideline:
+  file: "B.1.2 Data Table Guidelines.xlsx"
+  property_column: "Property"
+  requirement_column: "Requirement"
+  header_row: 1
+
+sheet:
+  name: "B1.2 Catalogue Table"
+  header_row: 2          # 1-indexed; row 1 holds submission labels, ignored
+  first_data_row: 3
+
+# Cell values treated as empty when checking that a mandatory column is filled.
+na_tokens: ["", "N/A", "n/a", "NA", "-", "TBD", "TBC", "null", "None"]
+
+# Lookup workbooks the checks resolve values against.
+references:
+  domains:
+    file: "Domains.xlsx"
+    sheet: "Sheet1"
+    header_row: 1
+    id_column: "Domain ID"
+    name_column: "Domain"
+
+# MM/DD/YYYY per guideline; a real Excel datetime is a finding, not a pass.
+date_format: "%m/%d/%Y"
+
+columns:
+  - n: 1
+    name: "Data Asset ID (English)"
+    requirement: mandatory
+    type: text
+    unique: true
+    role: key                         # referenced by the attribute sheet
+
+  - n: 2
+    name: "Data Asset ID (Arabic)"
+    requirement: optional
+    type: text
+
+  - n: 3
+    name: "Data Asset Name (English)"
+    requirement: mandatory
+    type: text
+    script: latin
+
+  - n: 4
+    name: "Data Asset Name (Arabic)"
+    requirement: mandatory
+    type: text
+    script: arabic
+
+  - n: 5
+    name: "Data Asset Description (English)"
+    requirement: mandatory
+    type: text
+    script: latin
+
+  - n: 6
+    name: "Data Asset Description (Arabic)"
+    requirement: mandatory
+    type: text
+    script: arabic
+
+  - n: 7
+    name: "Data Owner"
+    requirement: mandatory
+    type: email_list
+    separator: ","
+
+  - n: 8
+    name: "Data Steward"
+    requirement: mandatory
+    type: email_list
+    separator: ","
+
+  - n: 9
+    name: "Source System"
+    requirement: mandatory
+    type: text
+
+  - n: 10
+    name: "Domain ID"
+    requirement: mandatory
+    type: text
+    lookup:
+      reference: domains
+      column: id_column
+
+  - n: 11
+    name: "Domain Name"
+    requirement: mandatory
+    type: text
+    lookup:
+      reference: domains
+      column: name_column
+    # The pair must match the same row of the Domains reference.
+    pairs_with:
+      column: "Domain ID"
+      reference: domains
+
+  - n: 12
+    name: "Created Date"
+    requirement: mandatory
+    type: date
+
+  - n: 13
+    name: "Last Update Date"
+    requirement: mandatory
+    type: date
+    not_before: "Created Date"        # proposed, not stated in the guideline
+
+  - n: 14
+    name: "Retention Policy (Y/N)"
+    requirement: mandatory
+    type: enum
+    allowed: ["Y", "N"]
+
+  - n: 15
+    name: "Security Controls"
+    requirement: optional
+    type: text
+
+  - n: 16
+    name: "Backup Interval"
+    requirement: optional
+    type: text
+
+  - n: 17
+    name: "Recovery"
+    requirement: optional
+    type: text
+
+  - n: 18
+    name: "Audit Logs"
+    requirement: optional
+    type: text
+
+  - n: 19
+    name: "Data Consumption (Direct)"
+    requirement: optional
+    type: text
+
+  - n: 20
+    name: "Data Consumption (Indirect)"
+    requirement: optional
+    type: text
+
+  - n: 21
+    name: "Data Refresh Frequency"
+    requirement: mandatory
+    type: enum
+    case_sensitive: false
+    allowed: ["Daily", "Weekly", "Monthly", "Quarterly", "Yearly"]
+
+  - n: 22
+    name: "Function / Business Unit"
+    requirement: mandatory
+    type: text
+
+  - n: 23
+    name: "ADGOV Data Classification"
+    requirement: conditional
+    type: enum
+    allowed: ["Open", "Confidential", "Sensitive", "Secret"]
+    # Guideline: blank is permitted when classification is not applicable, but
+    # the field is mandatory whenever the table is published to the platform.
+    mandatory_if:
+      column: "Publish to Platform (Y/N)"
+      equals: "Y"
+    # Guideline: a table's classification "can be derived from the most
+    # stringent classification applied to its individual attributes".
+    # Reported as a warning, not an error - the wording is permissive.
+    derive_from_attributes:
+      spec: catalogue_attribute
+      column: "Data Classification"
+      rule: most_stringent
+      order: ["Open", "Confidential", "Sensitive", "Secret"]
+      severity: warning
+
+  - n: 24
+    name: "Data Glossary"
+    requirement: mandatory
+    type: list
+    separator: ","
+    # Stage 2 of the glossary protocol: a table's glossary entries are the
+    # union of the glossary entries of its attributes.
+    case_sensitive: true
+    aggregates_from_attributes:
+      spec: catalogue_attribute
+      column: "Data Glossary"
+      rule: union
+      match: strict          # set equality; a term on the table but on none
+                             # of its attributes is an error
+      severity: error
+
+  - n: 25
+    name: "Publish to Platform (Y/N)"
+    requirement: mandatory
+    type: enum
+    allowed: ["Y", "N"]
+
+  - n: 26
+    name: "Integrate To WofG (Y/N)"
+    requirement: mandatory
+    type: enum
+    allowed: ["Y", "N"]
+
+  - n: 27
+    name: "Data Source Name"
+    requirement: mandatory
+    type: text
+
+  - n: 28
+    name: "Data Asset Source Path"
+    requirement: mandatory
+    type: text
+
+  - n: 29
+    name: "Data Asset Type"
+    requirement: mandatory
+    type: enum
+    allowed: ["Table", "View", "BlobPath"]

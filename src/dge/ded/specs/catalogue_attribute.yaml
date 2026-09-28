@@ -1,0 +1,293 @@
+# Codified rules for the Data Attribute catalogue sheet.
+#
+# Source of record: data/ded/data_catalogue/B.1.3 Data Attributes Guideline.xlsx
+# See catalogue_table.yaml for the shared conventions.
+
+guideline:
+  file: "B.1.3 Data Attributes Guideline.xlsx"
+  property_column: "Property"
+  requirement_column: "Requirement"
+  header_row: 1
+
+sheet:
+  name: "B1.3 Catalogue Attribute"
+  header_row: 2
+  first_data_row: 3
+
+na_tokens: ["", "N/A", "n/a", "NA", "-", "TBD", "TBC", "null", "None"]
+
+references:
+  glossary:
+    file: "B2.1_Glossary.xlsx"
+    sheet: "B.2.1 Glossary"
+    header_row: 2
+    term_column: "Term Name"
+    tables_column: "Data Table ID"
+    status_column: "Approval Status"
+    approved_value: "Approved"
+
+date_format: "%m/%d/%Y"
+
+columns:
+  - n: 1
+    name: "Attribute ID (English)"
+    requirement: mandatory
+    type: text
+    # Guideline scope is per table; global uniqueness is permitted but not
+    # required, so only the per-table rule is enforced.
+    unique_within: "Data Asset ID"
+
+  - n: 2
+    name: "Attribute ID (Arabic)"
+    requirement: optional
+    type: text
+
+  - n: 3
+    name: "Attribute Description (English)"
+    requirement: mandatory
+    type: text
+    script: latin
+
+  - n: 4
+    name: "Attribute Description (Arabic)"
+    requirement: optional
+    type: text
+    script: arabic
+
+  - n: 5
+    name: "Data Asset ID"
+    requirement: mandatory
+    type: text
+    foreign_key:
+      spec: catalogue_table
+      column: "Data Asset ID (English)"
+
+  - n: 6
+    name: "Created Date"
+    requirement: mandatory
+    type: date
+
+  - n: 7
+    name: "Last Update Date"
+    requirement: mandatory
+    type: date
+    not_before: "Created Date"        # proposed, not stated in the guideline
+
+  - n: 8
+    name: "Nullable (Y/N)"
+    requirement: mandatory
+    type: enum
+    allowed: ["Y", "N"]
+
+  - n: 9
+    name: "Data Type"
+    requirement: mandatory
+    type: enum
+    case_sensitive: false
+    # Guideline gives examples only; this is a broad list of the SQL and
+    # logical types the deliverable is expected to draw from. Parameterised
+    # forms such as varchar(60) or decimal(10,2) are accepted - the length
+    # belongs in Data Length.
+    allow_parameterised: true
+    allowed:
+      # character / text
+      - char
+      - nchar
+      - varchar
+      - nvarchar
+      - text
+      - ntext
+      - string
+      - clob
+      # integer
+      - bit
+      - tinyint
+      - smallint
+      - int
+      - integer
+      - bigint
+      # decimal / floating point
+      - decimal
+      - numeric
+      - number
+      - float
+      - real
+      - double
+      - money
+      - smallmoney
+      # date / time
+      - date
+      - time
+      - datetime
+      - datetime2
+      - smalldatetime
+      - datetimeoffset
+      - timestamp
+      - year
+      # boolean
+      - boolean
+      - bool
+      # binary / object
+      - binary
+      - varbinary
+      - blob
+      - image
+      - uuid
+      - uniqueidentifier
+      - json
+      - xml
+      - array
+      - struct
+      - geography
+      - geometry
+
+  - n: 10
+    name: "Data Length"
+    requirement: mandatory
+    type: integer
+    min: 1
+
+  - n: 11
+    name: "Primary Key (Y/N)"
+    requirement: mandatory
+    type: enum
+    allowed: ["Y", "N"]
+
+  - n: 12
+    name: "Foreign Key Data Asset"
+    requirement: optional
+    type: text
+    foreign_key:
+      spec: catalogue_table
+      column: "Data Asset ID (English)"
+
+  - n: 13
+    name: "Data Classification"
+    requirement: mandatory
+    type: enum
+    allowed: ["Open", "Confidential", "Sensitive", "Secret"]
+
+  - n: 14
+    name: "Is Calculated? (Y/N)"
+    requirement: mandatory
+    type: enum
+    allowed: ["Y", "N"]
+
+  - n: 15
+    name: "Calculation Logic"
+    requirement: optional
+    type: text
+
+  - n: 16
+    name: "Business Validation Logic"
+    requirement: optional
+    type: text
+
+  - n: 17
+    name: "Data Completeness"
+    requirement: mandatory
+    type: number
+    min: 0
+    max: 100
+    # Percentage on a 0-100 scale per the guideline (example: 98).
+    # A cell formatted as a percentage holds 0.95 for 95%, so the stored value
+    # is scaled up before the range is checked. Only an unformatted value at
+    # or below 1 is ambiguous - 0.95 meaning 95% but displaying as 0.95.
+    percent_format_aware: true
+    suspect_at_or_below: 1
+
+  - n: 18
+    name: "Data Completeness Target"
+    requirement: mandatory
+    type: number
+    min: 0
+    max: 100
+    percent_format_aware: true
+    suspect_at_or_below: 1
+
+  - n: 19
+    name: "Missing Data Handling (Y/N)"
+    requirement: optional
+    type: enum
+    allowed: ["Y", "N"]
+
+  - n: 20
+    name: "Missing Data Handling Process"
+    requirement: optional
+    type: text
+
+  - n: 21
+    name: "Duplicate Data Handling (Y/N)"
+    requirement: optional
+    type: enum
+    allowed: ["Y", "N"]
+
+  - n: 22
+    name: "Duplicate Data Handling Process"
+    requirement: optional
+    type: text
+
+  - n: 23
+    name: "Duplicate (Y/N)"
+    requirement: mandatory
+    type: enum
+    allowed: ["Y", "N"]
+    # Guideline: "This field depends on the Primary Key value."
+    # A primary key cannot contain duplicates.
+    must_equal_if:
+      column: "Primary Key (Y/N)"
+      equals: "Y"
+      value: "N"
+
+  - n: 24
+    name: "Data Quality Issues"
+    requirement: optional
+    type: text
+
+  - n: 25
+    name: "Uniqueness Target"
+    requirement: mandatory
+    type: number
+    min: 0
+    max: 100
+    percent_format_aware: true
+    suspect_at_or_below: 1
+
+  - n: 26
+    name: "Data Glossary"
+    requirement: mandatory
+    type: list
+    separator: ","
+    case_sensitive: true
+    # Stage 1 of the glossary protocol: every entry must exist in the business
+    # glossary. Stage 2 (the table sheet's Data Glossary being the union of its
+    # attributes' entries) lives in catalogue_table.yaml.
+    #
+    # Two glossary terms contain a comma ("Address, Parcel or Owner Reference
+    # Number"), which collides with the separator. Terms are matched longest
+    # first so those survive intact rather than splitting into fragments.
+    glossary_terms:
+      reference: glossary
+      unknown_term:
+        severity: error
+      # The glossary names the tables each term applies to; a term used by an
+      # attribute whose table is not on that list means the two deliverables
+      # have drifted apart.
+      reverse_coverage:
+        severity: warning
+      approval:
+        severity: warning
+      unused_terms:
+        severity: info
+
+  - n: 27
+    name: "Data Owner"
+    requirement: mandatory
+    type: email_list
+    separator: ","
+
+  - n: 28
+    name: "Data Steward"
+    requirement: mandatory
+    type: email_list
+    separator: ","
