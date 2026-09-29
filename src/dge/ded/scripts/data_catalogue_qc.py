@@ -70,6 +70,10 @@ def run(
     table, attribute = sheets.get("catalogue_table"), sheets.get("catalogue_attribute")
     attribute_spec = specs["catalogue_attribute"]
 
+    if (dump := references.get("schema_dump")) is not None:
+        for key, sheet in sheets.items():
+            findings += checks.check_database_schema(sheet, specs[key], dump)
+
     # Terms are matched longest-first, so both glossary checks need the index.
     known: dict[str, str] = {}
     if (glossary := references.get("glossary")) is not None:

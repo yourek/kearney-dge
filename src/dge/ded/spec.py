@@ -46,6 +46,8 @@ class Spec:
     columns: list[Column]
     guideline: dict[str, Any]
     references: dict[str, Any]
+    database: dict[str, Any]
+    placeholder_tokens: list[str]
 
     def column(self, name: str) -> Column | None:
         return next((c for c in self.columns if c.name == name), None)
@@ -55,6 +57,12 @@ class Spec:
         if value is None:
             return True
         return str(value).strip() in self.na_tokens
+
+    def is_placeholder(self, value: Any) -> bool:
+        """True when a cell holds a stand-in for work not yet done."""
+        if self.is_na(value):
+            return True
+        return str(value).strip() in self.placeholder_tokens
 
 
 _RESERVED = {"n", "name", "requirement", "type"}
@@ -74,6 +82,8 @@ def load(key: str) -> Spec:
         date_format=raw["date_format"],
         guideline=raw["guideline"],
         references=raw.get("references", {}),
+        database=raw.get("database", {}),
+        placeholder_tokens=raw.get("placeholder_tokens", []),
         columns=[
             Column(
                 n=c["n"],

@@ -16,7 +16,44 @@ sheet:
 
 na_tokens: ["", "N/A", "n/a", "NA", "-", "TBD", "TBC", "null", "None"]
 
+# Values that stand in for work not yet done. They are reported by the
+# ordinary checks; the database comparison skips them so one unfilled cell
+# does not produce the same finding twice.
+placeholder_tokens: ["DE Team", "DED Input", "Modelling Team"]
+
+# The live schema, as dumped from INFORMATION_SCHEMA.COLUMNS. The database is
+# ground truth: where the catalogue disagrees, the catalogue is wrong.
+database:
+  reference: schema_dump
+  schema: silver_cleansed          # the dump also carries dbo/sys/queryinsights
+  join:
+    table: "Data Table Name (S)"
+    column: "Attribute Name"
+    to_table: table_name
+    to_column: column_name
+  unmatched:
+    severity: error
+  compare:
+    - column: "Data Type"
+      to: data_type
+      severity: error
+    - column: "Nullable (Y/N)"
+      to: is_nullable
+      map: {"YES": "Y", "NO": "N"}
+      severity: error
+    # Character columns carry a length; numeric ones carry precision and
+    # scale instead, which the catalogue writes as decimal(12,0).
+    - column: "Data Length"
+      to: column_length
+      precision: numeric_precision
+      scale: numeric_scale
+      severity: error
+
 references:
+  schema_dump:
+    file: "silver_schema_dump.xlsx"
+    sheet: "Sheet1"
+    header_row: 1
   glossary:
     file: "B2.1_Glossary.xlsx"
     sheet: "B.2.1 Glossary"
@@ -144,7 +181,9 @@ columns:
   - n: 10
     name: "Data Length"
     requirement: mandatory
-    type: integer
+    # A plain length for character columns, or decimal(precision, scale) for
+    # numeric ones. Both are checked against the database dump.
+    type: length
     min: 1
 
   - n: 11
@@ -194,6 +233,7 @@ columns:
     # is scaled up before the range is checked. Only an unformatted value at
     # or below 1 is ambiguous - 0.95 meaning 95% but displaying as 0.95.
     percent_format_aware: true
+    percent_format_warning: true
     suspect_at_or_below: 1
 
   - n: 18
@@ -203,6 +243,7 @@ columns:
     min: 0
     max: 100
     percent_format_aware: true
+    percent_format_warning: true
     suspect_at_or_below: 1
 
   - n: 19
@@ -251,6 +292,7 @@ columns:
     min: 0
     max: 100
     percent_format_aware: true
+    percent_format_warning: true
     suspect_at_or_below: 1
 
   - n: 26

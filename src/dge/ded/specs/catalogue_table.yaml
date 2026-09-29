@@ -20,6 +20,18 @@ sheet:
 na_tokens: ["", "N/A", "n/a", "NA", "-", "TBD", "TBC", "null", "None"]
 
 # Lookup workbooks the checks resolve values against.
+# Every data asset must exist as a table in the live database. The attribute
+# sheet checks its own columns against the same dump; this is the table-level
+# half of that, and where a misspelled asset name shows up first.
+database:
+  reference: schema_dump
+  schema: silver_cleansed
+  join:
+    table: "Data Asset Name (English)"
+    to_table: table_name
+  unmatched:
+    severity: error
+
 references:
   domains:
     file: "Domains.xlsx"
@@ -27,6 +39,10 @@ references:
     header_row: 1
     id_column: "Domain ID"
     name_column: "Domain"
+  schema_dump:
+    file: "silver_schema_dump.xlsx"
+    sheet: "Sheet1"
+    header_row: 1
 
 # MM/DD/YYYY per guideline; a real Excel datetime is a finding, not a pass.
 date_format: "%m/%d/%Y"

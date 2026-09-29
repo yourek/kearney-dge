@@ -15,17 +15,30 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from dge.ded.findings import Finding, Severity
+from dge.ded.findings import CATEGORY_ORDER, Finding, Severity
 from dge.ded.spec import Spec
 
-QC_COLUMNS = ("QC Result", "QC Severity", "QC Observations")
+# Structure findings - a missing column, a drifted guideline - belong to the
+# sheet rather than to any row, so they get no per-row flag column.
+ROW_CATEGORIES = tuple(name for name in CATEGORY_ORDER if name != "Structure")
+
+# Result, then one flag per category so the sheet can be filtered down to a
+# single kind of problem, then the full text last because it is the widest.
+QC_COLUMNS = (
+    "QC Result",
+    "QC Severity",
+    "QC Issues",
+    *(f"QC {name}" for name in ROW_CATEGORIES),
+    "QC Observations",
+)
+QC_WIDTHS = (12, 12, 8, *(13 for _ in ROW_CATEGORIES), 90)
 
 HEADER_FILL = PatternFill("solid", fgColor="44546A")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 FILLS = {
-    Severity.ERROR: PatternFill("solid", fgColor="F8CBAD"),
-    Severity.WARNING: PatternFill("solid", fgColor="FFE699"),
-    None: PatternFill("solid", fgColor="C6E0B4"),  # passed
+    Severity.ERROR: PatternFill("solid", fgColor="FFC7CE"),  # red
+    Severity.WARNING: PatternFill("solid", fgColor="FFD9A3"),  # orange
+    None: PatternFill("solid", fgColor="C6E0B4"),  # passed, green
 }
 
 
@@ -85,6 +98,7 @@ def write(
     _strip_defined_names(book)
     _strip_legacy_parts(book, keep_comments)
 
+    _write_findings(book, findings)
     _write_summary(book, findings, unplaced)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -160,8 +174,36 @@ def _reset_view(worksheet) -> None:
         selection.sqref = "A1"
 
 
+def _column_positions(worksheet, header_row: int) -> dict[str, int]:
+    """Map each header to its column index, so a finding can reach its cell."""
+    positions: dict[str, int] = {}
+    for cell in next(worksheet.iter_rows(min_row=header_row, max_row=header_row)):
+        if cell.value is not None and (name := str(cell.value).replace("\xa0", " ").strip()):
+            positions.setdefault(name, cell.column)
+    return positions
+
+
+def _highlight_cells(
+    worksheet, found: list[Finding], positions: dict[str, int], number: int
+) -> None:
+    """Colour the individual cells a finding points at.
+
+    The row verdict says something is wrong; this says which cell. Where a
+    cell draws both an error and a warning, the error wins.
+    """
+    worst: dict[int, Severity] = {}
+    for finding in found:
+        column = positions.get(finding.column)
+        if column is not None:
+            worst[column] = max(worst.get(column, Severity.INFO), finding.severity)
+    for column, severity in worst.items():
+        if fill := FILLS.get(severity):
+            worksheet.cell(row=number, column=column).fill = fill
+
+
 def _annotate_sheet(worksheet, spec: Spec, rows: dict[int, list[Finding]]) -> None:
     start = _last_column(worksheet, spec.header_row) + 1
+    positions = _column_positions(worksheet, spec.header_row)
 
     for offset, title in enumerate(QC_COLUMNS):
         cell = worksheet.cell(row=spec.header_row, column=start + offset, value=title)
@@ -169,8 +211,7 @@ def _annotate_sheet(worksheet, spec: Spec, rows: dict[int, list[Finding]]) -> No
         cell.font = HEADER_FONT
         cell.alignment = Alignment(vertical="center")
 
-    widths = (12, 12, 90)
-    for offset, width in enumerate(widths):
+    for offset, width in enumerate(QC_WIDTHS):
         worksheet.column_dimensions[get_column_letter(start + offset)].width = width
 
     # Only rows the checks actually looked at get a verdict; blank filler rows
@@ -180,19 +221,39 @@ def _annotate_sheet(worksheet, spec: Spec, rows: dict[int, list[Finding]]) -> No
         if found is None:
             if not _row_has_data(worksheet, number, start):
                 continue
-            result, severity, observations = "Passed", "", ""
-            fill = FILLS[None]
+            values = ["Passed", "", "", *("" for _ in ROW_CATEGORIES), ""]
+            fills: list[PatternFill | None] = [FILLS[None]] * len(values)
         else:
             worst = max(f.severity for f in found)
-            result = "Failed" if worst is Severity.ERROR else "Passed with warnings"
-            severity = str(worst)
-            observations = "\n".join(_describe(f) for f in sorted(found, key=_order))
-            fill = FILLS.get(worst, FILLS[None])
+            by_category: dict[str, Severity] = {}
+            for finding in found:
+                current = by_category.get(finding.category)
+                by_category[finding.category] = (
+                    finding.severity if current is None else max(current, finding.severity)
+                )
+            row_fill = FILLS.get(worst, FILLS[None])
+            values = [
+                "Failed" if worst is Severity.ERROR else "Passed with warnings",
+                str(worst),
+                len(found),
+                *(str(by_category[n]) if n in by_category else "" for n in ROW_CATEGORIES),
+                "\n".join(_describe(f) for f in sorted(found, key=_order)),
+            ]
+            fills = [
+                row_fill,
+                row_fill,
+                row_fill,
+                *(FILLS.get(by_category[n]) if n in by_category else None for n in ROW_CATEGORIES),
+                row_fill,
+            ]
+            _highlight_cells(worksheet, found, positions, number)
 
-        for offset, value in enumerate((result, severity, observations)):
+        last = len(values) - 1
+        for offset, value in enumerate(values):
             cell = worksheet.cell(row=number, column=start + offset, value=value)
-            cell.fill = fill
-            cell.alignment = Alignment(vertical="top", wrap_text=offset == 2)
+            if fills[offset] is not None:
+                cell.fill = fills[offset]
+            cell.alignment = Alignment(vertical="top", wrap_text=offset == last)
 
     _enable_filters(worksheet, spec, start + len(QC_COLUMNS) - 1)
     _reset_view(worksheet)
@@ -214,6 +275,54 @@ def _row_has_data(worksheet, number: int, before: int) -> bool:
         if cell.value is not None and str(cell.value).strip():
             return True
     return False
+
+
+FINDINGS_HEADERS = (
+    ("Severity", 11),
+    ("Category", 15),
+    ("Check", 26),
+    ("Sheet", 24),
+    ("Row", 8),
+    ("Column", 30),
+    ("Value", 38),
+    ("Message", 95),
+)
+
+
+def _write_findings(book, findings: list[Finding]) -> None:
+    """One row per finding, for working through a whole category at a time.
+
+    The annotated sheets answer "what is wrong with this row"; this answers
+    "where else does this problem occur", which is how the fixing is done.
+    """
+    if "QC Findings" in book.sheetnames:
+        del book["QC Findings"]
+    sheet = book.create_sheet("QC Findings", 0)
+
+    for index, (title, width) in enumerate(FINDINGS_HEADERS, start=1):
+        cell = sheet.cell(row=1, column=index, value=title)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        sheet.column_dimensions[get_column_letter(index)].width = width
+
+    for number, finding in enumerate(findings, start=2):
+        values = (
+            str(finding.severity),
+            finding.category,
+            finding.check,
+            finding.sheet,
+            finding.row,
+            finding.column,
+            None if finding.value is None else str(finding.value)[:200],
+            finding.message,
+        )
+        for index, value in enumerate(values, start=1):
+            sheet.cell(row=number, column=index, value=value)
+        if fill := FILLS.get(finding.severity):
+            sheet.cell(row=number, column=1).fill = fill
+
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(FINDINGS_HEADERS))}{len(findings) + 1}"
+    sheet.freeze_panes = "A2"
 
 
 def _write_summary(book, findings: list[Finding], unplaced: list[Finding]) -> None:
@@ -238,7 +347,18 @@ def _write_summary(book, findings: list[Finding], unplaced: list[Finding]) -> No
         sheet.cell(row=5 + offset, column=1, value=str(severity))
         sheet.cell(row=5 + offset, column=2, value=counts[severity])
 
-    row = 10
+    sheet["D4"] = "By category"
+    sheet["D4"].font = Font(bold=True)
+    per_category = Counter(f.category for f in findings)
+    line = 5
+    for name in CATEGORY_ORDER:
+        if not per_category[name]:
+            continue
+        sheet.cell(row=line, column=4, value=name)
+        sheet.cell(row=line, column=5, value=per_category[name])
+        line += 1
+
+    row = max(10, line + 1)
     sheet.cell(row=row, column=1, value="Severity").font = Font(bold=True)
     sheet.cell(row=row, column=2, value="Check").font = Font(bold=True)
     sheet.cell(row=row, column=3, value="Count").font = Font(bold=True)

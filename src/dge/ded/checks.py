@@ -8,6 +8,7 @@ the script. Nothing here modifies the deliverable.
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import re
 from pathlib import Path
 from typing import Any, Iterable
@@ -242,6 +243,20 @@ def _check_value(value: Any, column: Column, spec: Spec, number_format: str = ""
         bad = [p for p in parts if not EMAIL_RE.match(p)]
         return f"not a valid email address: {', '.join(bad)}" if bad else None
 
+    if kind == "length":
+        text = str(value).strip()
+        if PARAMETERISED_RE.match(text):
+            return None  # decimal(12,0); the figures are checked against the dump
+        try:
+            if float(text) != int(float(text)):
+                return "not a whole number"
+        except ValueError:
+            return "not a length or a decimal(precision, scale)"
+        low = column.get("min")
+        if low is not None and float(text) < low:
+            return f"below the minimum of {low}"
+        return None
+
     if kind in ("integer", "number"):
         try:
             number = float(str(value).strip())
@@ -285,11 +300,30 @@ def check_values(sheet: workbook.Sheet, spec: Spec) -> list[Finding]:
                 )
             suspect = column.get("suspect_at_or_below")
             fmt = row.number_format(column.name)
+            percent = column.get("percent_format_aware") and is_percent_format(fmt)
+
+            if percent and column.get("percent_format_warning"):
+                # Displays correctly in Excel, but the stored value is on a
+                # 0-1 scale, so anything reading the file outside Excel - a
+                # CSV export, a database load - sees 0.95 rather than 95.
+                findings.append(
+                    warning(
+                        "percent-formatted-value",
+                        f"stored as {value} with percentage formatting, so it "
+                        f"displays as {float(str(value)) * 100:g}%; the guideline "
+                        "expects the value itself on a 0-100 scale",
+                        sheet=sheet.name,
+                        row=row.number,
+                        column=column.name,
+                        value=value,
+                    )
+                )
+
             # A percentage-formatted cell is unambiguous: 0.95 displays as 95%.
             if (
                 suspect is not None
                 and column.type in ("integer", "number")
-                and not (column.get("percent_format_aware") and is_percent_format(fmt))
+                and not percent
             ):
                 try:
                     if 0 < float(str(value)) <= suspect:
@@ -613,6 +647,137 @@ def check_glossary(
             )
         )
     return findings
+
+
+def check_database_schema(
+    attribute_sheet: workbook.Sheet,
+    attribute_spec: Spec,
+    rows: list[dict[str, Any]],
+) -> list[Finding]:
+    """Compare a catalogue sheet against the live database schema.
+
+    The table sheet joins on the table alone; the attribute sheet joins on
+    table and column, and compares type, length and nullability too. The
+    database is ground truth. Cells still holding a placeholder are left to
+    the ordinary checks rather than reported twice.
+    """
+    config = attribute_spec.database
+    if not config:
+        return []
+    join = config["join"]
+    by_column = "column" in join
+    if not attribute_sheet.has(join["table"]):
+        return []
+    if by_column and not attribute_sheet.has(join["column"]):
+        return []
+
+    schema = config.get("schema")
+    in_scope = [
+        r
+        for r in rows
+        if r.get(join["to_table"])
+        and (schema is None or str(r.get("table_schema", "")).strip() == schema)
+    ]
+    tables = {str(r[join["to_table"]]).strip().lower() for r in in_scope}
+    index = {
+        (str(r[join["to_table"]]).strip().lower(), str(r[join["to_column"]]).strip().lower()): r
+        for r in in_scope
+        if by_column and r.get(join["to_column"])
+    }
+
+    findings: list[Finding] = []
+    for row in attribute_sheet:
+        table = row.text(join["table"])
+        name = row.text(join["column"]) if by_column else ""
+        if not table or (by_column and not name):
+            continue
+        match = index.get((table.lower(), name.lower())) if by_column else None
+        if match is None:
+            # Distinguish a misspelled table from a genuinely absent column,
+            # otherwise every column of that table reads as missing.
+            if table.lower() not in tables:
+                suggestion = difflib.get_close_matches(table.lower(), tables, 1, 0.8)
+                hint = f"; closest match is {suggestion[0]!r}" if suggestion else ""
+                findings.append(
+                    Finding(
+                        _severity_from(config["unmatched"]),
+                        "unknown-database-table",
+                        f"no table {table!r} in the {schema} schema{hint}",
+                        sheet=attribute_sheet.name,
+                        row=row.number,
+                        column=join["table"],
+                        value=table,
+                    )
+                )
+            elif not by_column:
+                continue  # the table exists, which is all this sheet checks
+            else:
+                findings.append(
+                    Finding(
+                        _severity_from(config["unmatched"]),
+                        "not-in-database",
+                        f"no column {name!r} in database table {table!r}",
+                        sheet=attribute_sheet.name,
+                        row=row.number,
+                        column=join["column"],
+                        value=name,
+                    )
+                )
+            continue
+
+        for rule in config["compare"]:
+            column = attribute_spec.column(rule["column"])
+            if column is None or not attribute_sheet.has(column.name):
+                continue
+            value = row.get(column.name)
+            if attribute_spec.is_placeholder(value):
+                continue
+            if message := _compare_to_database(str(value).strip(), match, rule):
+                findings.append(
+                    Finding(
+                        _severity_from(rule),
+                        "database-mismatch",
+                        message,
+                        sheet=attribute_sheet.name,
+                        row=row.number,
+                        column=column.name,
+                        value=value,
+                    )
+                )
+    return findings
+
+
+def _database_text(match: dict[str, Any], key: str) -> str:
+    """A dump cell as text; SQL NULLs arrive as the string 'NULL'."""
+    value = match.get(key)
+    text = "" if value is None else str(value).strip()
+    return "" if text.upper() == "NULL" else text
+
+
+def _compare_to_database(value: str, match: dict[str, Any], rule: dict[str, Any]) -> str | None:
+    """One catalogue cell against its database counterpart."""
+    actual = _database_text(match, rule["to"])
+
+    if mapping := rule.get("map"):
+        actual = mapping.get(actual.upper(), actual)
+        return None if value.upper() == actual.upper() else f"the database says {actual!r}"
+
+    precision_key = rule.get("precision")
+    if precision_key and not actual:
+        # A numeric column: the catalogue writes decimal(precision, scale).
+        precision = _database_text(match, precision_key)
+        scale = _database_text(match, rule["scale"])
+        if not precision:
+            return None
+        kind = _database_text(match, "data_type").lower()
+        expected = f"{kind}({precision},{scale})" if scale else f"{kind}({precision})"
+        if value.lower().replace(" ", "") != expected:
+            return f"the database says {expected!r}"
+        return None
+
+    if not actual:
+        return None
+    return None if value.lower() == actual.lower() else f"the database says {actual!r}"
 
 
 def check_derived_from_attributes(

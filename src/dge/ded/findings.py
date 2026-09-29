@@ -20,6 +20,61 @@ class Severity(IntEnum):
         return self.name.lower()
 
 
+# Findings are grouped into the buckets the fixing work actually divides
+# into, so a reviewer can filter the report down to one kind of problem.
+# The order here is the order the columns appear in the report.
+CATEGORY_ORDER = (
+    "Completeness",
+    "Valid values",
+    "Consistency",
+    "Reference data",
+    "Database",
+    "Glossary",
+    "Formatting",
+    "Structure",
+)
+
+CATEGORIES = {
+    "mandatory-empty": "Completeness",
+    "invalid-enum": "Valid values",
+    "invalid-date": "Valid values",
+    "invalid-length": "Valid values",
+    "invalid-integer": "Valid values",
+    "invalid-number": "Valid values",
+    "invalid-email_list": "Valid values",
+    "invalid-text": "Valid values",
+    "date-order": "Consistency",
+    "duplicate-value": "Consistency",
+    "inconsistent-value": "Consistency",
+    "classification-mismatch": "Consistency",
+    "unresolved-reference": "Reference data",
+    "unknown-reference-value": "Reference data",
+    "mismatched-pair": "Reference data",
+    "database-mismatch": "Database",
+    "unknown-database-table": "Database",
+    "not-in-database": "Database",
+    "unknown-glossary-term": "Glossary",
+    "glossary-coverage-gap": "Glossary",
+    "glossary-mismatch": "Glossary",
+    "glossary-term-not-approved": "Glossary",
+    "unused-glossary-term": "Glossary",
+    "glossary-separator-in-term": "Glossary",
+    "percent-formatted-value": "Formatting",
+    "suspect-scale": "Formatting",
+    "missing-column": "Structure",
+    "extra-column": "Structure",
+    "missing-sheet": "Structure",
+    "guideline-drift": "Structure",
+    "not-checked": "Structure",
+    "missing-reference": "Structure",
+}
+
+
+def category_of(check: str) -> str:
+    """The bucket a check belongs to; unmapped checks fall under Structure."""
+    return CATEGORIES.get(check, "Structure")
+
+
 @dataclass
 class Finding:
     """One problem, located as precisely as the check can manage."""
@@ -31,6 +86,10 @@ class Finding:
     row: int | None = None
     column: str = ""
     value: Any = None
+
+    @property
+    def category(self) -> str:
+        return category_of(self.check)
 
     @property
     def location(self) -> str:

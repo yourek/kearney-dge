@@ -68,9 +68,21 @@ scripts/data_catalogue_qc.py   CLI that wires them together
 
 The primary output is an annotated copy of the deliverable, written to
 `<catalogue dir>/output/<YYYYMMDD_HHMMSS>_<input name>.xlsx`. Each checked
-sheet gains `QC Result` / `QC Severity` / `QC Observations` columns, colour
-coded, with every finding for that row listed in one cell; a `QC Summary`
-sheet carries the counts and the findings that are not tied to a row. The
+sheet gains `QC Result` / `QC Severity` / `QC Observations` columns, with
+every finding for that row listed in one cell; a `QC Summary` sheet carries
+the counts and the findings that are not tied to a row. Each offending cell
+is filled too - red for an error, orange for a warning, green on a row that
+passed - so the sheet can be navigated by colour rather than by reading the
+observations. A finding lands on a cell whenever its `column` matches a
+header, so give every finding the column it belongs to.
+
+Each row also carries a flag column per category (`QC Database`,
+`QC Glossary`, …) holding the worst severity in that category, so the sheet
+filters down to one kind of problem at a time. Categories come from
+`findings.CATEGORIES`, which maps check name to bucket - **add an entry there
+whenever you add a check**, or it silently falls into `Structure`. A
+`QC Findings` sheet lists every finding one per row, filterable by category,
+check, sheet and column, for working through a whole category at once. The
 input file is only ever read.
 
 The deliverable carries a lot of inherited baggage that does not survive an
@@ -100,6 +112,26 @@ Two checks read the cell's Excel number format, not just its value, so
 - a percentage-formatted cell holds 0.95 for 95%, so `percent_format_aware`
   columns are scaled up before their 0-100 range is checked. Only an
   unformatted value at or below 1 is ambiguous and warns.
+
+## The database comparison
+
+`silver_schema_dump.xlsx` is an `INFORMATION_SCHEMA.COLUMNS` export and is
+treated as ground truth: where the catalogue disagrees with it, the catalogue
+is wrong. The `database:` block in the attribute spec drives it.
+
+Attributes join to the dump on `(Data Table Name (S), Attribute Name)` against
+`(table_name, column_name)`, lowercased, restricted to the `silver_cleansed`
+schema - the dump also carries `dbo`, `sys` and `queryinsights` rows that are
+not catalogue content.
+
+`Data Length` is a character length for most columns but `decimal(p, s)` for
+numeric ones, where the dump supplies `numeric_precision` / `numeric_scale`
+and `column_length` is NULL. Cells still holding a `placeholder_tokens` value
+are skipped here, so one unfilled cell is not reported twice.
+
+The dump does not decide which tables belong in the catalogue - the 50
+`silver_cleansed` tables it documents that the catalogue omits are scope
+decisions made elsewhere, and are deliberately not checked.
 
 ## The glossary protocol
 
