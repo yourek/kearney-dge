@@ -15,6 +15,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from dge.ded import workbook
 from dge.ded.findings import CATEGORY_ORDER, Finding, Severity
 from dge.ded.spec import Spec
 
@@ -178,7 +179,7 @@ def _column_positions(worksheet, header_row: int) -> dict[str, int]:
     """Map each header to its column index, so a finding can reach its cell."""
     positions: dict[str, int] = {}
     for cell in next(worksheet.iter_rows(min_row=header_row, max_row=header_row)):
-        if cell.value is not None and (name := str(cell.value).replace("\xa0", " ").strip()):
+        if name := workbook.clean_header(cell.value):
             positions.setdefault(name, cell.column)
     return positions
 

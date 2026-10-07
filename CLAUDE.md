@@ -98,6 +98,17 @@ call it from `run()`. A rule that cannot run yet (its reference file is
 missing) carries a `todo:` and is reported as "not-checked" rather than
 failing.
 
+Everything resolves relative to the catalogue passed in, so a second domain is
+just a second folder - `data/dct/data_catalogue/` alongside `data/ded/...` -
+holding its own copies of the lookup and guideline workbooks under the same
+file names. Nothing else changes.
+
+A lookup or guideline workbook that is absent, corrupt, or missing its
+expected sheet is reported as a warning and the checks relying on it are
+skipped; only a missing *catalogue* sheet is an error. A run against a folder
+holding nothing but the catalogue still performs every check that needs no
+reference, and still writes its report.
+
     uv run python -m dge.ded.scripts.data_catalogue_qc <catalogue.xlsx> --csv out.csv
 
 Exit code is 1 when any error-severity finding is raised.
@@ -119,10 +130,17 @@ Two checks read the cell's Excel number format, not just its value, so
 treated as ground truth: where the catalogue disagrees with it, the catalogue
 is wrong. The `database:` block in the attribute spec drives it.
 
-Attributes join to the dump on `(Data Table Name (S), Attribute Name)` against
-`(table_name, column_name)`, lowercased, restricted to the `silver_cleansed`
-schema - the dump also carries `dbo`, `sys` and `queryinsights` rows that are
-not catalogue content.
+Attributes join to the dump on the table and column name against
+`(table_name, column_name)`, lowercased. The deliverables disagree on what
+those columns are called - `Data Table Name (S)` in DED, `Data Table Name` in
+DCT - so `join.table` and `join.column` are lists of candidates and the first
+one present wins. If none is present the comparison is skipped with a
+warning; it must never skip silently.
+
+The schema is resolved per run, not pinned: the spec's `schema` if the dump
+has it, else the dump's only non-system schema (DED exports
+`silver_cleansed`, DCT exports `cln`), else every schema with a warning.
+`--schema` overrides. The choice is always reported as a finding.
 
 `Data Length` is a character length for most columns but `decimal(p, s)` for
 numeric ones, where the dump supplies `numeric_precision` / `numeric_scale`
@@ -133,6 +151,17 @@ The dump does not decide which tables belong in the catalogue - the 50
 `silver_cleansed` tables it documents that the catalogue omits are scope
 decisions made elsewhere, and are deliberately not checked.
 
+## Columns that do not apply to every row
+
+`exempt_if` waives a column's rules on the rows where it is meaningless -
+completeness figures for an attribute that is not a critical data element.
+With no `value`, the waiver covers however the cell is filled in (blank,
+`N/A`, `Not a CDE`); a figure that really was supplied is still range-checked.
+
+Header whitespace is collapsed on read, because the same column is typed
+`CDE Flag (Y/N)` in one deliverable and `CDE Flag  (Y/N)` in another. Match
+columns by their collapsed name.
+
 ## The glossary protocol
 
 `B2.1_Glossary.xlsx` is a deliverable in its own right, used here as a lookup.
@@ -140,6 +169,12 @@ Two of its 1122 terms contain a comma - the same character the catalogue uses
 to separate list entries - so `checks.parse_terms` matches terms longest-first
 instead of splitting naively. Any check reading a `Data Glossary` cell must go
 through it, or those terms shatter into fragments that match nothing.
+
+A list column's `separator` is a list of characters, because deliverables
+built from the same template disagree: DED writes stewards comma-separated,
+DCT semicolon-separated. Splitting keeps the separator each cell actually
+used, so a term containing a comma still matches only where a comma was
+written, not where a semicolon was.
 
 The glossary also names the tables each term applies to, which drives the
 reverse-coverage check (a warning: the two deliverables are on separate

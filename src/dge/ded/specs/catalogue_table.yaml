@@ -27,7 +27,7 @@ database:
   reference: schema_dump
   schema: silver_cleansed
   join:
-    table: "Data Asset Name (English)"
+    table: ["Data Asset Name (English)", "Data Asset Name"]
     to_table: table_name
   unmatched:
     severity: error
@@ -88,13 +88,13 @@ columns:
     name: "Data Owner"
     requirement: mandatory
     type: email_list
-    separator: ","
+    separator: [",", ";"]
 
   - n: 8
     name: "Data Steward"
     requirement: mandatory
     type: email_list
-    separator: ","
+    separator: [",", ";"]
 
   - n: 9
     name: "Source System"
@@ -173,7 +173,7 @@ columns:
     requirement: mandatory
     type: enum
     case_sensitive: false
-    allowed: ["Daily", "Weekly", "Monthly", "Quarterly", "Yearly"]
+    allowed: ["Daily", "Weekly", "Monthly", "Quarterly", "Yearly", "Static / No Updates"]
 
   - n: 22
     name: "Function / Business Unit"
@@ -204,7 +204,7 @@ columns:
     name: "Data Glossary"
     requirement: mandatory
     type: list
-    separator: ","
+    separator: [",", ";"]
     # Stage 2 of the glossary protocol: a table's glossary entries are the
     # union of the glossary entries of its attributes.
     case_sensitive: true

@@ -28,15 +28,46 @@ FORMAT_NOISE_RE = re.compile(r"\[[^\]]*\]|\"[^\"]*\"|\\.")
 PARAMETERISED_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_ ]*)\s*\((\s*\d+\s*(,\s*\d+\s*)?)\)$")
 
 
-def _split(value: Any, separator: str) -> list[str]:
-    return [part.strip() for part in str(value).split(separator) if part.strip()]
+def separators_of(column: Column) -> list[str]:
+    """The separators a list column may use.
+
+    Deliverables built from the same template disagree - one writes stewards
+    comma-separated, another semicolon-separated - so a column accepts any of
+    the characters its spec lists.
+    """
+    separator = column.get("separator", ",")
+    return [separator] if isinstance(separator, str) else list(separator)
+
+
+def _parts(value: Any, separators: list[str]) -> tuple[list[str], list[str]]:
+    """Split on any separator, keeping the ones used so text can be rebuilt."""
+    pattern = "(" + "|".join(re.escape(s) for s in separators) + ")"
+    tokens = re.split(pattern, str(value))
+    return [t.strip() for t in tokens[0::2]], tokens[1::2]
+
+
+def _split(value: Any, separators: list[str] | str) -> list[str]:
+    if isinstance(separators, str):
+        separators = [separators]
+    values, _ = _parts(value, separators)
+    return [v for v in values if v]
+
+
+def _as_float(value: Any) -> float | None:
+    """The cell as a number, or None when it does not hold one."""
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def parse_terms(value: Any, known: dict[str, str], separator: str = ",") -> list[str]:
+def parse_terms(
+    value: Any, known: dict[str, str], separators: list[str] | str = ","
+) -> list[str]:
     """Split a list cell into terms, preferring the longest known term.
 
     Some glossary terms contain the separator themselves ("Address, Parcel or
@@ -47,13 +78,22 @@ def parse_terms(value: Any, known: dict[str, str], separator: str = ",") -> list
     `known` maps a normalised term to its canonical spelling; pass an empty
     mapping to fall back to a plain split.
     """
-    parts = _split(value, separator)
-    joiner = f"{separator} "
+    if isinstance(separators, str):
+        separators = [separators]
+    parts, used = _parts(value, separators)
     terms: list[str] = []
     index = 0
     while index < len(parts):
+        if not parts[index]:
+            index += 1
+            continue
         for end in range(len(parts), index, -1):  # longest candidate first
-            candidate = _normalise(joiner.join(parts[index:end]))
+            # Rebuild with the separators the cell actually used, so a term
+            # containing a comma only matches where a comma was written.
+            candidate = parts[index]
+            for step in range(index + 1, end):
+                candidate += f"{used[step - 1]} {parts[step]}"
+            candidate = _normalise(candidate)
             if candidate in known:
                 terms.append(known[candidate])
                 index = end
@@ -62,6 +102,23 @@ def parse_terms(value: Any, known: dict[str, str], separator: str = ",") -> list
             terms.append(parts[index])
             index += 1
     return terms
+
+
+def _is_exempt(row: workbook.Row, column: Column, sheet: workbook.Sheet) -> bool:
+    """True when a column's rules are waived for this row.
+
+    Some columns do not apply to every attribute - completeness figures are
+    meaningless for something that is not a critical data element - and the
+    deliverable records an agreed stand-in value instead of a number.
+    """
+    rule = column.get("exempt_if")
+    if not rule or not sheet.has(rule["column"]):
+        return False
+    if row.text(rule["column"]).upper() != str(rule["equals"]).upper():
+        return False
+    # With no `value`, the column is waived however the cell is filled in.
+    expected = rule.get("value")
+    return expected is None or row.text(column.name) == expected
 
 
 def _severity_from(rule: dict[str, Any], default: Severity = Severity.ERROR) -> Severity:
@@ -82,9 +139,26 @@ def check_guideline_drift(spec: Spec, guidelines_dir: Path) -> list[Finding]:
     config = spec.guideline
     path = guidelines_dir / config["file"]
     if not path.exists():
-        return [warning("guideline-drift", f"guideline workbook not found: {path.name}")]
+        return [
+            warning(
+                "guideline-drift",
+                f"guideline workbook not found: {path.name}; "
+                "the spec could not be verified against it",
+            )
+        ]
 
-    book = workbook.load_sheet(path, "Sheet1", config["header_row"], config["header_row"] + 1)
+    try:
+        book = workbook.load_sheet(
+            path, "Sheet1", config["header_row"], config["header_row"] + 1
+        )
+    except Exception as exc:  # unreadable, wrong sheet, no header row
+        return [
+            warning(
+                "guideline-drift",
+                f"could not read {path.name}: {exc}; "
+                "the spec could not be verified against it",
+            )
+        ]
     published = [
         (row.text(config["property_column"]), row.text(config["requirement_column"]).lower())
         for row in book
@@ -164,7 +238,7 @@ def check_mandatory(sheet: workbook.Sheet, spec: Spec) -> list[Finding]:
         conditional = column.get("mandatory_if")
         for row in sheet:
             value = row.get(column.name)
-            if not spec.is_na(value):
+            if not spec.is_na(value) or _is_exempt(row, column, sheet):
                 continue
             if column.is_mandatory:
                 reason = "mandatory column is empty"
@@ -236,8 +310,7 @@ def _check_value(value: Any, column: Column, spec: Spec, number_format: str = ""
         return f"not a permitted value; expected one of: {', '.join(allowed)}"
 
     if kind == "email_list":
-        separator = column.get("separator", ",")
-        parts = _split(value, separator)
+        parts = _split(value, separators_of(column))
         if not parts:
             return "no email address found"
         bad = [p for p in parts if not EMAIL_RE.match(p)]
@@ -287,6 +360,10 @@ def check_values(sheet: workbook.Sheet, spec: Spec) -> list[Finding]:
             value = row.get(column.name)
             if spec.is_na(value):
                 continue  # emptiness is check_mandatory's business
+            # On an exempt row a stand-in is fine, but a figure that really
+            # was supplied is still held to the column's rules.
+            if _is_exempt(row, column, sheet) and _as_float(value) is None:
+                continue
             if message := _check_value(value, column, spec, row.number_format(column.name)):
                 findings.append(
                     error(
@@ -302,7 +379,9 @@ def check_values(sheet: workbook.Sheet, spec: Spec) -> list[Finding]:
             fmt = row.number_format(column.name)
             percent = column.get("percent_format_aware") and is_percent_format(fmt)
 
-            if percent and column.get("percent_format_warning"):
+            # Text in a percentage-formatted cell is reported as an invalid
+            # number above; there is nothing to scale here.
+            if percent and column.get("percent_format_warning") and _as_float(value) is not None:
                 # Displays correctly in Excel, but the stored value is on a
                 # 0-1 scale, so anything reading the file outside Excel - a
                 # CSV export, a database load - sees 0.95 rather than 95.
@@ -310,7 +389,7 @@ def check_values(sheet: workbook.Sheet, spec: Spec) -> list[Finding]:
                     warning(
                         "percent-formatted-value",
                         f"stored as {value} with percentage formatting, so it "
-                        f"displays as {float(str(value)) * 100:g}%; the guideline "
+                        f"displays as {_as_float(value) * 100:g}%; the guideline "
                         "expects the value itself on a 0-100 scale",
                         sheet=sheet.name,
                         row=row.number,
@@ -559,7 +638,7 @@ def check_glossary(
 
     config = attribute_spec.references[rule["reference"]]
     known = glossary_index(rows, config)
-    separator = column.get("separator", ",")
+    separators = separators_of(column)
     findings: list[Finding] = []
 
     term_key, tables_key = config["term_column"], config["tables_column"]
@@ -584,7 +663,7 @@ def check_glossary(
         if attribute_spec.is_na(value):
             continue
         asset = row.text(link.name) if link else ""
-        for term in parse_terms(value, known, separator):
+        for term in parse_terms(value, known, separators):
             if _normalise(term) not in known:
                 findings.append(
                     Finding(
@@ -637,11 +716,11 @@ def check_glossary(
             )
         )
 
-    if ambiguous := [t for t in known.values() if separator in t]:
+    if ambiguous := [t for t in known.values() if any(s in t for s in separators)]:
         findings.append(
             info(
                 "glossary-separator-in-term",
-                f"{len(ambiguous)} glossary term(s) contain the {separator!r} list "
+                f"{len(ambiguous)} glossary term(s) contain a list "
                 f"separator, e.g. {ambiguous[0]!r}; matched longest-first so they "
                 "are not split, but the template convention is ambiguous",
             )
@@ -649,10 +728,72 @@ def check_glossary(
     return findings
 
 
+# Schemas a warehouse creates for itself, never catalogue content.
+SYSTEM_SCHEMAS = {"dbo", "sys", "information_schema", "queryinsights", "guest"}
+
+
+def _names(wanted: str | list[str]) -> str:
+    return ", ".join(repr(n) for n in ([wanted] if isinstance(wanted, str) else wanted))
+
+
+def _first_present(sheet: workbook.Sheet, wanted: str | list[str]) -> str | None:
+    """The first of the candidate column names the sheet actually has."""
+    for name in [wanted] if isinstance(wanted, str) else wanted:
+        if sheet.has(name):
+            return name
+    return None
+
+
+def resolve_schema(
+    rows: list[dict[str, Any]], preferred: str | None, override: str | None = None
+) -> tuple[str | None, Finding | None]:
+    """Decide which schema in the dump holds the catalogued tables.
+
+    The spec names the schema it expects, but a second deliverable's dump
+    uses its own - DED exports `silver_cleansed`, DCT exports `cln` - so a
+    pinned name silently filters every row away. Returns the schema to use
+    (None means "do not filter") and a finding explaining the choice.
+    """
+    present = {
+        str(r["table_schema"]).strip()
+        for r in rows
+        if r.get("table_schema") and str(r["table_schema"]).strip()
+    }
+    if not present:
+        return None, None
+
+    if override:
+        if override in present:
+            return override, info("database-schema", f"using schema {override!r} as requested")
+        return None, warning(
+            "database-schema",
+            f"requested schema {override!r} is not in the dump "
+            f"(it holds {', '.join(sorted(present))}); comparing against every schema",
+        )
+
+    if preferred in present:
+        return preferred, None
+
+    candidates = sorted(s for s in present if s.lower() not in SYSTEM_SCHEMAS)
+    if len(candidates) == 1:
+        return candidates[0], info(
+            "database-schema",
+            f"the dump holds no {preferred!r} schema; using {candidates[0]!r}, "
+            "the only non-system schema in it",
+        )
+    return None, warning(
+        "database-schema",
+        f"the dump holds no {preferred!r} schema and no single obvious "
+        f"replacement ({', '.join(candidates) or 'none'}); comparing against "
+        "every schema. Pass --schema to choose one",
+    )
+
+
 def check_database_schema(
     attribute_sheet: workbook.Sheet,
     attribute_spec: Spec,
     rows: list[dict[str, Any]],
+    schema: str | None = None,
 ) -> list[Finding]:
     """Compare a catalogue sheet against the live database schema.
 
@@ -666,12 +807,24 @@ def check_database_schema(
         return []
     join = config["join"]
     by_column = "column" in join
-    if not attribute_sheet.has(join["table"]):
-        return []
-    if by_column and not attribute_sheet.has(join["column"]):
-        return []
 
-    schema = config.get("schema")
+    # Deliverables name the join columns differently - "Data Table Name (S)"
+    # in one, "Data Table Name" in another - so the spec lists the candidates
+    # and the first one present wins.
+    table_column = _first_present(attribute_sheet, join["table"])
+    name_column = _first_present(attribute_sheet, join["column"]) if by_column else None
+    for wanted, found in ((join["table"], table_column), *([(join["column"], name_column)] if by_column else [])):
+        if found is None:
+            return [
+                warning(
+                    "database-join-column-missing",
+                    f"{attribute_sheet.name!r} has none of the columns the "
+                    f"database comparison joins on ({_names(wanted)}); the "
+                    "comparison is skipped for this sheet",
+                    sheet=attribute_sheet.name,
+                )
+            ]
+
     in_scope = [
         r
         for r in rows
@@ -687,8 +840,8 @@ def check_database_schema(
 
     findings: list[Finding] = []
     for row in attribute_sheet:
-        table = row.text(join["table"])
-        name = row.text(join["column"]) if by_column else ""
+        table = row.text(table_column)
+        name = row.text(name_column) if by_column else ""
         if not table or (by_column and not name):
             continue
         match = index.get((table.lower(), name.lower())) if by_column else None
@@ -702,10 +855,11 @@ def check_database_schema(
                     Finding(
                         _severity_from(config["unmatched"]),
                         "unknown-database-table",
-                        f"no table {table!r} in the {schema} schema{hint}",
+                        f"no table {table!r} in the "
+                        f"{schema or 'database'} schema{hint}",
                         sheet=attribute_sheet.name,
                         row=row.number,
-                        column=join["table"],
+                        column=table_column,
                         value=table,
                     )
                 )
@@ -719,7 +873,7 @@ def check_database_schema(
                         f"no column {name!r} in database table {table!r}",
                         sheet=attribute_sheet.name,
                         row=row.number,
-                        column=join["column"],
+                        column=name_column,
                         value=name,
                     )
                 )
@@ -850,7 +1004,7 @@ def check_aggregated_from_attributes(
         source = rule["column"]
         if not attribute_sheet.has(source):
             continue
-        separator = column.get("separator", ",")
+        separators = separators_of(column)
         severity = _severity_from(rule)
 
         terms = known or {}
@@ -860,7 +1014,7 @@ def check_aggregated_from_attributes(
             asset = row.text(link.name)
             value = row.get(source)
             if asset and not attribute_spec.is_na(value):
-                union.setdefault(asset, set()).update(parse_terms(value, terms, separator))
+                union.setdefault(asset, set()).update(parse_terms(value, terms, separators))
 
         key = table_spec.columns[0].name
         for row in table_sheet:
@@ -869,7 +1023,7 @@ def check_aggregated_from_attributes(
                 continue
             value = row.get(column.name)
             declared = (
-                set(parse_terms(value, terms, separator))
+                set(parse_terms(value, terms, separators))
                 if not table_spec.is_na(value)
                 else set()
             )

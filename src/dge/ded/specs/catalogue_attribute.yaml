@@ -27,8 +27,9 @@ database:
   reference: schema_dump
   schema: silver_cleansed          # the dump also carries dbo/sys/queryinsights
   join:
-    table: "Data Table Name (S)"
-    column: "Attribute Name"
+    # Candidate column names, first present wins: the deliverables disagree.
+    table: ["Data Table Name (S)", "Data Table Name"]
+    column: ["Attribute Name", "Attribute Name (English)"]
     to_table: table_name
     to_column: column_name
   unmatched:
@@ -177,6 +178,8 @@ columns:
       - struct
       - geography
       - geometry
+      - nvarchar(MAX)
+      - nvarchar(max)
 
   - n: 10
     name: "Data Length"
@@ -235,6 +238,13 @@ columns:
     percent_format_aware: true
     percent_format_warning: true
     suspect_at_or_below: 1
+    # Completeness is meaningless for an attribute that is not a critical
+    # data element, so the column is waived on those rows: blank, N/A or an
+    # explanatory stand-in such as "Not a CDE" are all accepted. A figure
+    # that is actually supplied is still range-checked.
+    exempt_if:
+      column: "CDE Flag (Y/N)"
+      equals: "N"
 
   - n: 18
     name: "Data Completeness Target"
@@ -245,6 +255,13 @@ columns:
     percent_format_aware: true
     percent_format_warning: true
     suspect_at_or_below: 1
+    # Completeness is meaningless for an attribute that is not a critical
+    # data element, so the column is waived on those rows: blank, N/A or an
+    # explanatory stand-in such as "Not a CDE" are all accepted. A figure
+    # that is actually supplied is still range-checked.
+    exempt_if:
+      column: "CDE Flag (Y/N)"
+      equals: "N"
 
   - n: 19
     name: "Missing Data Handling (Y/N)"
@@ -299,7 +316,7 @@ columns:
     name: "Data Glossary"
     requirement: mandatory
     type: list
-    separator: ","
+    separator: [",", ";"]
     case_sensitive: true
     # Stage 1 of the glossary protocol: every entry must exist in the business
     # glossary. Stage 2 (the table sheet's Data Glossary being the union of its
@@ -326,10 +343,10 @@ columns:
     name: "Data Owner"
     requirement: mandatory
     type: email_list
-    separator: ","
+    separator: [",", ";"]
 
   - n: 28
     name: "Data Steward"
     requirement: mandatory
     type: email_list
-    separator: ","
+    separator: [",", ";"]

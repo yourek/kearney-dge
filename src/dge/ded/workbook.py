@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -16,6 +17,17 @@ def _clean(value: Any) -> Any:
         text = value.replace("\xa0", " ").strip()
         return text or None
     return value
+
+
+def clean_header(value: Any) -> str:
+    """A header as the specs name it.
+
+    Runs of whitespace are collapsed, so a column typed as
+    'CDE Flag  (Y/N)' in one deliverable and 'CDE Flag (Y/N)' in another is
+    the same column to every check.
+    """
+    text = _clean(value)
+    return "" if text is None else re.sub(r"\s+", " ", str(text))
 
 
 @dataclass
@@ -68,9 +80,7 @@ def load_sheet(path: Path, sheet_name: str, header_row: int, first_data_row: int
     # Cells rather than bare values, so date columns keep their display format.
     for number, raw in enumerate(worksheet.iter_rows(), start=1):
         if number == header_row:
-            headers = [
-                str(h) if (h := _clean(cell.value)) is not None else "" for cell in raw
-            ]
+            headers = [clean_header(cell.value) for cell in raw]
         elif number >= first_data_row:
             values: dict[str, Any] = {}
             formats: dict[str, str] = {}

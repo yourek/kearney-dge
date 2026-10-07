@@ -23,6 +23,7 @@ def run(
     references_dir: Path,
     guidelines_dir: Path,
     specs: dict[str, spec_module.Spec] | None = None,
+    schema: str | None = None,
 ) -> list[Finding]:
     """Run every check and return the findings, worst first."""
     specs = specs if specs is not None else {k: spec_module.load(k) for k in SPEC_KEYS}
@@ -36,11 +37,24 @@ def run(
             if name in references:
                 continue
             path = references_dir / config["file"]
-            if path.exists():
-                references[name] = workbook.load_reference(path, config)
-            else:
+            if not path.exists():
                 findings.append(
-                    warning("missing-reference", f"reference workbook not found: {path.name}")
+                    warning(
+                        "missing-reference",
+                        f"reference workbook not found: {path.name}; "
+                        "the checks that rely on it are skipped",
+                    )
+                )
+                continue
+            try:
+                references[name] = workbook.load_reference(path, config)
+            except Exception as exc:  # unreadable, wrong sheet, no header row
+                findings.append(
+                    warning(
+                        "unreadable-reference",
+                        f"could not read {path.name}: {exc}; "
+                        "the checks that rely on it are skipped",
+                    )
                 )
 
     sheets: dict[str, workbook.Sheet] = {}
@@ -49,7 +63,7 @@ def run(
             sheets[key] = workbook.load_sheet(
                 catalogue, current.sheet_name, current.header_row, current.first_data_row
             )
-        except (KeyError, ValueError) as exc:
+        except Exception as exc:  # a catalogue sheet is required, so this is an error
             findings.append(Finding(Severity.ERROR, "missing-sheet", str(exc)))
 
     for key, current in specs.items():
@@ -71,8 +85,13 @@ def run(
     attribute_spec = specs["catalogue_attribute"]
 
     if (dump := references.get("schema_dump")) is not None:
+        # Resolved once, so the choice is explained once rather than per sheet.
+        preferred = attribute_spec.database.get("schema")
+        resolved, note = checks.resolve_schema(dump, preferred, schema)
+        if note is not None:
+            findings.append(note)
         for key, sheet in sheets.items():
-            findings += checks.check_database_schema(sheet, specs[key], dump)
+            findings += checks.check_database_schema(sheet, specs[key], dump, resolved)
 
     # Terms are matched longest-first, so both glossary checks need the index.
     known: dict[str, str] = {}
@@ -111,6 +130,11 @@ def main(argv: list[str] | None = None) -> int:
         "(default: an 'output' directory beside the catalogue)",
     )
     parser.add_argument(
+        "--schema",
+        help="database schema in the dump to compare against "
+        "(default: the spec's schema, or the dump's only non-system one)",
+    )
+    parser.add_argument(
         "--keep-comments",
         action="store_true",
         help="keep the deliverable's cell comments in the report; they are "
@@ -143,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         args.references or directory,
         args.guidelines or directory,
         specs,
+        args.schema,
     )
 
     print(f"Data Catalogue QC: {args.catalogue.name}")
