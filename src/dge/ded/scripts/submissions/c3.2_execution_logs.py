@@ -11,10 +11,15 @@ The log identifies a rule only by its technical id - a Purview GUID, or a
 `DQP-CR-n` id for a complex rule. The golden rulebook
 (`DED_Golden_DQ_Rulebook.xlsx`, sheet `Golden Rulebook-CDErule level`) maps
 that id - `Silver Technical ID` or `Bronze Technical ID`, by layer - to the
-DQO `Rule ID` both layers share, the table, the attribute, the lifecycle and
-the DGE guardrail. The per-sprint tabs (`Sprint1 RB`, `Sprint2 RB`,
-`Sprint 3 RB`) are keyed by that DQO and supply the criticality, which the
-golden sheet does not carry. The match is on the technical id alone: a
+DQO `Rule ID` both layers share, the table, the attribute, the lifecycle,
+the criticality and the DGE guardrail. The rulebook's layout keeps moving,
+so each of those is found by the first of several header names present
+(`RULEBOOK_COLUMNS`).
+
+Only the rulebook's *active* rules count: the submission is the inner join
+of the active rules with the log. A rule that ran but is not active in the
+rulebook (Draft, Disabled, ...) is not submitted. The match is on the
+technical id alone: a
 rule the rulebook does not know by its id keeps those columns empty, even
 when a rulebook rule of the same name exists, because a different id under
 the same name means the rule was recreated and the rulebook has not caught
@@ -30,6 +35,10 @@ guardrail for the rule's dimension (`DGE_GUARDRAIL`) is assumed, and the
 rule is listed on the gaps workbook's `Assumed guardrail` sheet.
 `Threshold Result` compares the score with the target, as the submissions
 always have - `=IF(Score>=Target,"Good",IF(Score>=Target-10%,"At Risk","Bad"))`.
+
+Every active rule should run on both layers. The gaps workbook's
+`Layer mismatches` sheet lists each rule submitted in one layer but not the
+other, with why the other layer lacks it.
 
 `Created On` and `Modified On` are the submission date.
 
@@ -59,8 +68,6 @@ LOG_SHEET = "execution_log"
 TEMPLATE_FILE = "C3.2 Template.xlsx"
 RULEBOOK_FILE = "DED_Golden_DQ_Rulebook.xlsx"
 RULEBOOK_SHEET = "Golden Rulebook-CDErule level"
-#: The rulebook's per-sprint tabs, however the space before the number falls.
-SPRINT_SHEET = re.compile(r"Sprint\s*\d+ RB")
 OUTPUT_NAME = "DED_{date:%Y%m%d}_Execution_Log_C.3.2_{layer}.xlsx"
 GAPS_NAME = "DED_{date:%Y%m%d}_Execution_Log_C.3.2_rulebook_gaps.xlsx"
 LAYERS = ("Bronze", "Silver")
@@ -97,14 +104,32 @@ TECHNICAL_ID = {"Bronze": "Bronze Technical ID", "Silver": "Silver Technical ID"
 #: is a placeholder and must not pair rules up with each other.
 TECHNICAL_ID_FORMAT = re.compile(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}|dqp-cr-\d+")
 
-#: The rulebook's current rule name and expression - the `(Updating as
-#: aligned with DQ)` columns, not their `(Reference, don't delete)` twins.
-#: Rulebook names are the silver ones, so only a silver rule can find a
-#: same-name candidate.
-RULEBOOK_NAME = "Rule_Name_Title(Updating as aligned with DQ)"
-RULEBOOK_EXPRESSION = "Rule_Expression_Logic (Updating as aligned with DQ)"
-RULEBOOK_GUARDRAIL = "DGE Guardrail %"
-RULEBOOK_DIMENSION = "DQ Dimension (Updating as aligned with DQ)"
+#: The golden sheet's columns, each as the header names it has gone by -
+#: newest layout first, the first one present wins. Older layouts kept a
+#: `(Reference, don't delete)` twin beside the `(Updating as aligned with
+#: DQ)` column read here. Rulebook names are the silver ones, so only a
+#: silver rule can find a same-name candidate. `Expected_Outcome_Threshold`
+#: replaced `DGE Guardrail %` and follows the same per-dimension guardrails.
+RULEBOOK_COLUMNS = {
+    "rule_id": ("Rule ID",),
+    "table_id": ("Table ID",),
+    "attribute_id": ("Attribute ID",),
+    "lifecycle": ("Status", "Rule Lifecycle Status"),
+    "name": ("Rule_Name_Title", "Rule_Name_Title(Updating as aligned with DQ)"),
+    "expression": ("Rule_Expression_Logic", "Rule_Expression_Logic (Updating as aligned with DQ)"),
+    "description": ("Business Rule Description",
+                    "Business Rule Description (Updating as aligned with DQ)"),
+    "dimension": ("DQ Dimension", "DQ Dimension (Updating as aligned with DQ)"),
+    "guardrail": ("Expected_Outcome_Threshold", "DGE Guardrail %"),
+    "criticality": ("Priority_Criticality",),
+}
+
+#: Rulebook columns whose absence empties an output column rather than
+#: making the rulebook unusable.
+OPTIONAL_RULEBOOK_COLUMNS = frozenset({"guardrail", "criticality", "description"})
+
+#: Criticality values that hold a place rather than give a level.
+CRITICALITY_PLACEHOLDERS = frozenset({"pending dq input"})
 
 #: The DGE guardrail per DQ dimension, as the rulebook applies it, assumed
 #: for a rule whose rulebook row gives none. `check_guardrails` reports any
@@ -119,16 +144,27 @@ DGE_GUARDRAIL = {
 }
 
 #: The rulebook's lifecycle statuses in the toolkit's vocabulary (Draft,
-#: Published, Deprecated). A status not listed here is written as it is.
-LIFECYCLE = {"active": "Published", "draft": "Draft", "inactive": "Deprecated"}
+#: Published, Deprecated), keyed by the status up to its first non-letter -
+#: `Disabled- Secret` is a `disabled`. A status not listed here is written
+#: as it is.
+LIFECYCLE = {
+    "active": "Published",
+    "draft": "Draft",
+    "inactive": "Deprecated",
+    "disabled": "Deprecated",
+    "duplicate": "Deprecated",
+}
 
 #: The rulebook marks a rule with no attribute in more than one way; the
 #: template writes `TABLE_LEVEL`.
 TABLE_LEVEL = "TABLE_LEVEL"
-TABLE_LEVEL_SPELLINGS = frozenset(
-    {"table_level", "rule applied at table level, attribute id not applicable"}
-)
-ATTRIBUTE_ID = re.compile(r"DED_Attribute_\d+")
+TABLE_LEVEL_SPELLINGS = frozenset({
+    "table_level",
+    "rule applied at table level, attribute id not applicable",
+    "rule applied at a table level",
+})
+#: One attribute id, or several for a rule spanning columns.
+ATTRIBUTE_ID = re.compile(r"DED_Attribute_\d+(\s*,\s*DED_Attribute_\d+)*")
 TABLE_ID = re.compile(r"DED_Data_Table_\d+")
 
 #: Output columns copied from an execution log column as they are.
@@ -205,118 +241,138 @@ class RulebookEntry:
     lifecycle: str | None
     #: The DGE guardrail as a fraction - 0.95 for 95%.
     guardrail: float | None
+    criticality: str | None
     dimension: str
     expression: str | None
+    description: str | None
     name: str
+    #: (layer, technical id as the rulebook writes it) per layer.
+    technical_ids: tuple[tuple[str, str], ...] = ()
+
+    def technical_id(self, layer: str) -> str:
+        return dict(self.technical_ids).get(layer, "")
 
     @property
     def active(self) -> bool:
+        """Whether the rule is in force. Only active rules are submitted."""
         return (self.lifecycle or "").lower() == "active"
 
 
 @dataclass
 class Rulebook:
-    #: Layer -> lowercased technical id -> every rulebook row carrying it.
+    #: Layer -> lowercased technical id -> every *active* rulebook row
+    #: carrying it. Only these are joined to the log.
     by_guid: dict[str, dict[str, list[RulebookEntry]]]
-    #: Lowercased rule name -> rulebook rows, for gap candidates only.
+    #: The same for the rows that are not active, to say why a rule that ran
+    #: is not submitted.
+    inactive_by_guid: dict[str, dict[str, list[RulebookEntry]]]
+    #: Lowercased rule name -> active rulebook rows, for gap candidates only.
     by_name: dict[str, list[tuple[RulebookEntry, str]]]
+    #: The active rows.
     entries: list[RulebookEntry]
-    #: DQO -> criticality, from the per-sprint tabs.
-    criticality: dict[str, str]
-    #: DQOs the sprint tabs give conflicting criticalities; left empty.
-    criticality_conflicts: list[str]
-    sprint_sheets: list[str]
+    #: Logical column -> the header it was read from; absent when missing.
+    columns: dict[str, str]
 
     def lookup(self, layer: str, guid: object) -> tuple[RulebookEntry | None, str | None]:
-        """The rulebook row for a rule, or why there is none."""
-        hits = self.by_guid.get(layer, {}).get(text(guid).lower(), [])
-        if len(hits) > 1:
-            # One id on several rows: trust the single active one, if any.
-            hits = [h for h in hits if h.active] or hits
-        if not hits:
-            return None, "technical id not in rulebook"
-        if len(hits) > 1:
-            return None, "technical id on several rulebook rows: " + ", ".join(h.rule_id for h in hits)
-        return hits[0], None
+        """The active rulebook row for a rule, or why there is none."""
+        key = text(guid).lower()
+        hits = self.by_guid.get(layer, {}).get(key, [])
+        if len(hits) == 1:
+            return hits[0], None
+        if hits:
+            return None, "technical id on several active rulebook rules: " + ", ".join(h.rule_id for h in hits)
+        inactive = self.inactive_by_guid.get(layer, {}).get(key, [])
+        if inactive:
+            return None, "rule not active in rulebook: " + ", ".join(
+                f"{h.rule_id} ({h.lifecycle or 'no status'})" for h in inactive)
+        # Not under its own layer - but perhaps entered under the other one.
+        for other in LAYERS:
+            if other == layer:
+                continue
+            elsewhere = (self.by_guid.get(other, {}).get(key, [])
+                         + self.inactive_by_guid.get(other, {}).get(key, []))
+            if elsewhere:
+                return None, (f"rule not in golden rulebook as a {layer} rule: its id is the "
+                              f"{other} Technical ID of " + ", ".join(h.rule_id for h in elsewhere))
+        return None, f"rule not in golden rulebook: no rule has {layer} Technical ID {text(guid)}"
 
 
 def load_rulebook(path: Path) -> Rulebook:
-    """The rulebook's technical id mapping, and the sprint tabs' criticality."""
+    """The golden sheet's technical id mapping. Its header sits below one
+    or more banner rows."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        book = load_golden_sheet(wb)
-        load_sprint_sheets(wb, book)
+        rows = wb[RULEBOOK_SHEET].iter_rows(values_only=True)
+        for row in rows:
+            headers = [collapse(h) for h in row]
+            if "Rule ID" in headers:
+                break
+        else:
+            raise ValueError(f"no 'Rule ID' header in [{RULEBOOK_SHEET}]")
+        # The first column of each name, should a helper block repeat one.
+        position = {h: headers.index(h) for h in reversed(headers) if h}
+
+        columns = {
+            key: next((n for n in names if n in position), None)
+            for key, names in RULEBOOK_COLUMNS.items()
+        }
+        missing = [" / ".join(RULEBOOK_COLUMNS[k]) for k, n in columns.items()
+                   if n is None and k not in OPTIONAL_RULEBOOK_COLUMNS]
+        missing += [h for h in TECHNICAL_ID.values() if h not in position]
+        if missing:
+            raise ValueError(f"[{RULEBOOK_SHEET}] lacks columns: {'; '.join(missing)}")
+        col = {k: position[n] for k, n in columns.items() if n}
+
+        def cell(row: tuple, key: str) -> object:
+            return row[col[key]] if key in col else None
+
+        book = Rulebook(by_guid=defaultdict(lambda: defaultdict(list)),
+                        inactive_by_guid=defaultdict(lambda: defaultdict(list)),
+                        by_name=defaultdict(list), entries=[],
+                        columns={k: n for k, n in columns.items() if n})
+        for row in rows:
+            rule_id = text(cell(row, "rule_id"))
+            if not rule_id:
+                continue
+            criticality = text(cell(row, "criticality"))
+            entry = RulebookEntry(
+                rule_id=rule_id,
+                table_id=clean_table_id(cell(row, "table_id")),
+                attribute_id=clean_attribute_id(cell(row, "attribute_id")),
+                lifecycle=text(cell(row, "lifecycle")) or None,
+                guardrail=fraction(cell(row, "guardrail")),
+                criticality=None if criticality.lower() in CRITICALITY_PLACEHOLDERS else criticality or None,
+                dimension=text(cell(row, "dimension")),
+                expression=text(cell(row, "expression")) or None,
+                description=text(cell(row, "description")) or None,
+                name=text(cell(row, "name")),
+                technical_ids=tuple(
+                    (layer, text(row[position[header]])) for layer, header in TECHNICAL_ID.items()
+                ),
+            )
+            if entry.active:
+                book.entries.append(entry)
+            for layer, header in TECHNICAL_ID.items():
+                guid = text(row[position[header]]).lower()
+                if not TECHNICAL_ID_FORMAT.fullmatch(guid):
+                    continue
+                if entry.active:
+                    book.by_guid[layer][guid].append(entry)
+                    book.by_name[entry.name.lower()].append((entry, f"{layer}:{guid}"))
+                else:
+                    book.inactive_by_guid[layer][guid].append(entry)
         return book
     finally:
         wb.close()
 
 
-def load_sprint_sheets(wb, book: Rulebook) -> None:
-    """Criticality per DQO from every `Sprint n RB` tab. A DQO the tabs give
-    two different criticalities is left out rather than guessed."""
-    seen: dict[str, set[str]] = defaultdict(set)
-    for name in wb.sheetnames:
-        if not SPRINT_SHEET.fullmatch(name):
-            continue
-        rows = wb[name].iter_rows(values_only=True)
-        headers = [collapse(h) for h in next(rows, ())]
-        if "Rule_ID" not in headers or "Priority_Criticality" not in headers:
-            raise ValueError(f"[{name}] lacks Rule_ID or Priority_Criticality")
-        rule_col, crit_col = headers.index("Rule_ID"), headers.index("Priority_Criticality")
-        book.sprint_sheets.append(name)
-        for row in rows:
-            rule_id, criticality = text(row[rule_col]), text(row[crit_col])
-            if rule_id and criticality:
-                seen[rule_id].add(criticality)
-    for rule_id, values in seen.items():
-        if len(values) == 1:
-            book.criticality[rule_id] = values.pop()
-        else:
-            book.criticality_conflicts.append(rule_id)
-
-
-def load_golden_sheet(wb) -> Rulebook:
-    """The golden sheet's technical id mapping. Its header sits below a
-    banner row."""
-    rows = wb[RULEBOOK_SHEET].iter_rows(values_only=True)
-    for row in rows:
-        headers = [collapse(h) for h in row]
-        if "Rule ID" in headers:
-            break
-    else:
-        raise ValueError(f"no 'Rule ID' header in [{RULEBOOK_SHEET}]")
-    needed = {"Rule ID", "Table ID", "Attribute ID", "Rule Lifecycle Status",
-              RULEBOOK_NAME, RULEBOOK_EXPRESSION, RULEBOOK_GUARDRAIL, RULEBOOK_DIMENSION,
-              *TECHNICAL_ID.values()}
-    missing = needed - set(headers)
-    if missing:
-        raise ValueError(f"[{RULEBOOK_SHEET}] lacks columns: {', '.join(sorted(missing))}")
-    # The first column of each name: the helper block repeats `Table ID`.
-    col = {h: headers.index(h) for h in reversed(headers) if h}
-
-    book = Rulebook(by_guid=defaultdict(lambda: defaultdict(list)), by_name=defaultdict(list),
-                    entries=[], criticality={}, criticality_conflicts=[], sprint_sheets=[])
-    for row in rows:
-        rule_id = text(row[col["Rule ID"]])
-        if not rule_id:
-            continue
-        entry = RulebookEntry(
-            rule_id=rule_id,
-            table_id=clean_table_id(row[col["Table ID"]]),
-            attribute_id=clean_attribute_id(row[col["Attribute ID"]]),
-            lifecycle=text(row[col["Rule Lifecycle Status"]]) or None,
-            guardrail=number(row[col[RULEBOOK_GUARDRAIL]]),
-            dimension=text(row[col[RULEBOOK_DIMENSION]]),
-            expression=text(row[col[RULEBOOK_EXPRESSION]]) or None,
-            name=text(row[col[RULEBOOK_NAME]]),
-        )
-        book.entries.append(entry)
-        for layer, header in TECHNICAL_ID.items():
-            guid = text(row[col[header]]).lower()
-            if TECHNICAL_ID_FORMAT.fullmatch(guid):
-                book.by_guid[layer][guid].append(entry)
-                book.by_name[entry.name.lower()].append((entry, f"{layer}:{guid}"))
-    return book
+def fraction(value: object) -> float | None:
+    """A percentage as a fraction. The rulebook mostly writes 0.95 for 95%,
+    but now and then 100 for 100%."""
+    value = number(value)
+    if value is not None and value > 1:
+        value /= 100
+    return value
 
 
 def check_guardrails(book: Rulebook) -> Counter[tuple[str, float]]:
@@ -349,7 +405,7 @@ def clean_attribute_id(value: object) -> str | None:
 def toolkit_lifecycle(status: str | None) -> str | None:
     if not status:
         return None
-    return LIFECYCLE.get(status.lower(), status)
+    return LIFECYCLE.get(re.match(r"[a-z]*", status.lower()).group(), status)
 
 
 def load_log(path: Path) -> list[dict[str, object]]:
@@ -414,7 +470,7 @@ def hierarchical_path(row: dict[str, object]) -> str:
 
 
 def to_record(row: dict[str, object], entry: RulebookEntry | None, dataset_table: str | None,
-              criticality: str | None, submitted: date) -> dict[str, object]:
+              submitted: date) -> dict[str, object]:
     """One output row, keyed by toolkit header. `ASSUMED` marks a row whose
     guardrail was assumed rather than read from the rulebook."""
     record: dict[str, object] = dict.fromkeys(FROM_RULEBOOK)
@@ -428,7 +484,10 @@ def to_record(row: dict[str, object], entry: RulebookEntry | None, dataset_table
 
     scanned = as_date(row["Date"])
     record["Batch_ID"] = f"{row['Layer']}_Batch_{scanned:%Y%m%d}" if scanned else None
-    # What ran is what the log says; the rulebook's expression is the fallback.
+    # What ran is what the log says; the rulebook is the fallback.
+    record["Description"] = (
+        text(row["Description_Business_Definition"]) or (entry.description if entry else None) or None
+    )
     record["Technical Description"] = (
         text(row["Rule_Expression_Logic"]) or (entry.expression if entry else None) or None
     )
@@ -447,7 +506,7 @@ def to_record(row: dict[str, object], entry: RulebookEntry | None, dataset_table
             "Rule_ID": entry.rule_id,
             "Attribute_ID": entry.attribute_id,
             "Lifecycle": toolkit_lifecycle(entry.lifecycle),
-            "Criticality": criticality,
+            "Criticality": entry.criticality,
         })
     return record
 
@@ -489,15 +548,28 @@ def write_submission(template: Path, records: list[dict[str, object]], out: Path
     """Write `records` over the template's sample rows; return unknown headers."""
     wb, headers, styles = open_template(template)
     write_rows(wb.worksheets[0], headers, styles, records)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(out)
+    save(wb, out)
     return [h for h in headers if h and records and h not in records[0]]
 
 
+class OutputLocked(Exception):
+    """An output file is open - in Excel, most likely - and cannot be replaced."""
+
+
+def save(wb: openpyxl.Workbook, out: Path) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        wb.save(out)
+    except PermissionError as exc:
+        raise OutputLocked(f"{out} is open elsewhere; close it and rerun") from exc
+
+
 def write_gaps(template: Path, removed: dict[str, list[dict[str, object]]],
-               assumed: list[dict[str, object]], out: Path) -> None:
+               assumed: list[dict[str, object]], mismatches: list[dict[str, object]],
+               out: Path) -> None:
     """One `<Layer> removed` sheet per layer, in the submission's columns plus
-    `GAP_COLUMNS`, and an `Assumed guardrail` sheet."""
+    `GAP_COLUMNS`, a `Layer mismatches` sheet and an `Assumed guardrail`
+    sheet."""
     wb, headers, styles = open_template(template)
     first = wb.worksheets[0]
     last = first.cell(row=1, column=len(headers))
@@ -516,6 +588,16 @@ def write_gaps(template: Path, removed: dict[str, list[dict[str, object]]],
         ws.title = f"{layer} removed"
         write_rows(ws, headers, styles, removed.get(layer, []))
 
+    ws = wb.create_sheet("Layer mismatches")
+    ws.append(MISMATCH_COLUMNS)
+    for record in mismatches:
+        ws.append([record.get(c) for c in MISMATCH_COLUMNS])
+    when = MISMATCH_COLUMNS.index("Present scanned time") + 1
+    for row in ws.iter_rows(min_row=2, min_col=when, max_col=when):
+        row[0].number_format = "mm-dd-yy"
+    ws.auto_filter.ref = (f"A1:{get_column_letter(len(MISMATCH_COLUMNS))}"
+                          f"{max(len(mismatches) + 1, 2)}")
+
     ws = wb.create_sheet("Assumed guardrail")
     columns = ("Layer", "In submission", "Rule_ID", "Technical Rule Reference", "Name",
                "DQ_Dimension", "Threshold")
@@ -526,8 +608,53 @@ def write_gaps(template: Path, removed: dict[str, list[dict[str, object]]],
         row[0].number_format = "0%"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{max(len(assumed) + 1, 2)}"
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(out)
+    save(wb, out)
+
+
+#: The `Layer mismatches` sheet's columns.
+MISMATCH_COLUMNS = ("Rule_ID", "Name", "DQ_Dimension", "Data Table ID", "Present in",
+                    "Present technical id", "Present scanned time", "Missing in",
+                    "Missing technical id", "Reason")
+
+
+def layer_mismatches(submitted: dict[str, dict[str, dict[str, object]]],
+                     ran: dict[str, dict[str, str | None]],
+                     book: Rulebook | None) -> list[dict[str, object]]:
+    """Every rule submitted in one layer but not the other, and why the
+    other layer lacks it - each active rule should be run on both.
+
+    `submitted` is layer -> DQO -> record; `ran` is layer -> lowercased
+    technical id in the log -> why it was not submitted (None if it was).
+    """
+    rules = {e.rule_id: e for e in book.entries} if book else {}
+    mismatches = []
+    for present in LAYERS:
+        for missing in LAYERS:
+            if missing == present:
+                continue
+            for rule_id in sorted(submitted.get(present, {}).keys() - submitted.get(missing, {}).keys()):
+                record = submitted[present][rule_id]
+                entry = rules.get(rule_id)
+                missing_id = entry.technical_id(missing) if entry else ""
+                if not TECHNICAL_ID_FORMAT.fullmatch(missing_id.lower()):
+                    reason = f"no {missing} Technical ID in rulebook ({missing_id or 'blank'})"
+                elif missing_id.lower() not in ran.get(missing, {}):
+                    reason = f"{missing} rule did not run: its id is not in the execution log"
+                else:
+                    reason = f"{missing} run not submitted: {ran[missing][missing_id.lower()]}"
+                mismatches.append({
+                    "Rule_ID": rule_id,
+                    "Name": record["Name"],
+                    "DQ_Dimension": record["DQ_Dimension"],
+                    "Data Table ID": record["Data Table ID"],
+                    "Present in": present,
+                    "Present technical id": record["Technical Rule Reference"],
+                    "Present scanned time": record["Scanned Time"],
+                    "Missing in": missing,
+                    "Missing technical id": missing_id or None,
+                    "Reason": reason,
+                })
+    return mismatches
 
 
 def gap_columns(layer: str, row: dict[str, object], reason: str,
@@ -549,7 +676,7 @@ def summarise(layer: str, records: list[dict[str, object]], removed: int, out: P
 
     batches = Counter(r["Batch_ID"] for r in records)
     print(f"\n{layer}: {len(records)} rules -> {out}")
-    print(f"  Removed (not in rulebook): {removed}")
+    print(f"  Removed (no active rulebook rule): {removed}")
     print(f"  Threshold Result (vs Target): {counts('Threshold Result', '(no target)')}")
     print(f"  Threshold (DGE guardrail): {counts('Threshold', '(none)')}"
           f" - {sum(r[ASSUMED] for r in records)} assumed by dimension")
@@ -605,12 +732,15 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
 
     if book:
-        if not book.sprint_sheets:
-            print("warning: rulebook has no 'Sprint n RB' tabs; Criticality left empty",
-                  file=sys.stderr)
-        if book.criticality_conflicts:
-            print(f"warning: sprint tabs disagree on the criticality of "
-                  f"{', '.join(book.criticality_conflicts)}; left empty", file=sys.stderr)
+        print("Rulebook columns: " + ", ".join(f"{k} <- '{n}'" for k, n in book.columns.items()))
+        consequence = {
+            "guardrail": "guardrails assumed by dimension",
+            "criticality": "Criticality left empty",
+            "description": "no fallback for a blank Description",
+        }
+        for key in sorted(OPTIONAL_RULEBOOK_COLUMNS - book.columns.keys()):
+            print(f"warning: rulebook has no {' / '.join(RULEBOOK_COLUMNS[key])} column; "
+                  f"{consequence[key]}", file=sys.stderr)
         departures = check_guardrails(book)
         if departures:
             print("warning: rulebook guardrails departing from the assumed DGE guardrail: "
@@ -623,6 +753,8 @@ def main(argv: list[str] | None = None) -> int:
 
     removed: dict[str, list[dict[str, object]]] = {}
     assumed: list[dict[str, object]] = []
+    submitted: dict[str, dict[str, dict[str, object]]] = {}
+    ran: dict[str, dict[str, str | None]] = {}
     for layer in LAYERS:
         layer_rows = [r for r in rows if r["Layer"] == layer]
         if not layer_rows:
@@ -636,9 +768,7 @@ def main(argv: list[str] | None = None) -> int:
         tables = dataset_tables(layer_rows, entries)
         records, removed[layer] = [], []
         for row, (entry, reason) in zip(layer_rows, lookups):
-            criticality = book.criticality.get(entry.rule_id) if book and entry else None
-            record = to_record(row, entry, tables.get(text(row["Dataset_ID"]).lower()),
-                               criticality, args.date)
+            record = to_record(row, entry, tables.get(text(row["Dataset_ID"]).lower()), args.date)
             if reason:
                 # Without its DQO a rule cannot be submitted; it waits in the gaps.
                 record.update(gap_columns(layer, row, reason, book))
@@ -647,6 +777,8 @@ def main(argv: list[str] | None = None) -> int:
                 records.append(record)
             if record[ASSUMED]:
                 assumed.append({**record, "Layer": layer, "In submission": "N" if reason else "Y"})
+        ran[layer] = {text(row["Rule_ID"]).lower(): reason for row, (_, reason) in zip(layer_rows, lookups)}
+        submitted[layer] = {r["Rule_ID"]: r for r in records}
 
         out = out_dir / OUTPUT_NAME.format(date=args.date, layer=layer)
         unknown = write_submission(template, records, out)
@@ -655,13 +787,21 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
         summarise(layer, records, len(removed[layer]), out)
 
-    if any(removed.values()) or assumed:
+    mismatches = layer_mismatches(submitted, ran, book)
+    if any(removed.values()) or assumed or mismatches:
         gaps_out = out_dir / GAPS_NAME.format(date=args.date)
-        write_gaps(template, removed, assumed, gaps_out)
+        write_gaps(template, removed, assumed, mismatches, gaps_out)
         print(f"\n{sum(map(len, removed.values()))} rules removed, "
+              f"{len(mismatches)} layer mismatches, "
               f"{len(assumed)} guardrails assumed -> {gaps_out}")
+        for m in mismatches:
+            print(f"  {m['Rule_ID']} only in {m['Present in']}: {m['Reason']}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except OutputLocked as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
