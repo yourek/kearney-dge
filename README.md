@@ -9,3 +9,7 @@ uv run python -m dge.ded.scripts.data_catalogue_qc data/ded/data_catalogue/Catal
 
 # Submissions command
 uv run python src/dge/ded/scripts/submissions/c3.2_execution_logs.py data/ded/submission_execution_log
+
+
+# Lineage submission
+uv run python src/dge/ded/scripts/submissions/b3.1_linage.py data/ded/linage_mapper

@@ -12,7 +12,7 @@ The log identifies a rule only by its technical id - a Purview GUID, or a
 (`DED_Golden_DQ_Rulebook.xlsx`, sheet `Golden Rulebook-CDErule level`) maps
 that id - `Silver Technical ID` or `Bronze Technical ID`, by layer - to the
 DQO `Rule ID` both layers share, the table, the attribute, the lifecycle,
-the criticality and the DGE guardrail. The rulebook's layout keeps moving,
+the criticality, the DQ dimension and the DGE guardrail. The rulebook's layout keeps moving,
 so each of those is found by the first of several header names present
 (`RULEBOOK_COLUMNS`).
 
@@ -33,6 +33,8 @@ other rules run against the same Purview dataset, and is taken from there.
 guardrail from the rulebook. Where the rulebook gives no guardrail, the DGE
 guardrail for the rule's dimension (`DGE_GUARDRAIL`) is assumed, and the
 rule is listed on the gaps workbook's `Assumed guardrail` sheet.
+`DQ_Dimension` is the rulebook's too, the log's only where the rulebook
+gives none.
 `Threshold Result` compares the score with the target, as the submissions
 always have - `=IF(Score>=Target,"Good",IF(Score>=Target-10%,"At Risk","Bad"))`.
 
@@ -44,7 +46,12 @@ other, with why the other layer lacks it.
 
 Outputs land in `<input dir>/output/`, named
 `DED_<YYYYMMDD>_Execution_Log_C.3.2_<Layer>.xlsx`, replacing any existing
-file of that name. The inputs are only ever read.
+file of that name. When the submitted rules span several sprints, each
+sprint is its own deliverable instead -
+`DED_<YYYYMMDD>_Execution_Log_Sprint<n>_C.3.2_<Layer>.xlsx` - by the
+rulebook's sprint for the rule (the log's, for a rule the rulebook does not
+know), so a rule lands in the same sprint on both layers. The inputs are
+only ever read.
 
     uv run python src/dge/ded/scripts/submissions/c3.2_execution_logs.py data/ded/submission_execution_log
 """
@@ -69,6 +76,8 @@ TEMPLATE_FILE = "C3.2 Template.xlsx"
 RULEBOOK_FILE = "DED_Golden_DQ_Rulebook.xlsx"
 RULEBOOK_SHEET = "Golden Rulebook-CDErule level"
 OUTPUT_NAME = "DED_{date:%Y%m%d}_Execution_Log_C.3.2_{layer}.xlsx"
+#: The name when the log spans several sprints: one deliverable per sprint.
+SPRINT_OUTPUT_NAME = "DED_{date:%Y%m%d}_Execution_Log_{sprint}_C.3.2_{layer}.xlsx"
 GAPS_NAME = "DED_{date:%Y%m%d}_Execution_Log_C.3.2_rulebook_gaps.xlsx"
 LAYERS = ("Bronze", "Silver")
 
@@ -122,11 +131,12 @@ RULEBOOK_COLUMNS = {
     "dimension": ("DQ Dimension", "DQ Dimension (Updating as aligned with DQ)"),
     "guardrail": ("Expected_Outcome_Threshold", "DGE Guardrail %"),
     "criticality": ("Priority_Criticality",),
+    "sprint": ("Sprint",),
 }
 
 #: Rulebook columns whose absence empties an output column rather than
 #: making the rulebook unusable.
-OPTIONAL_RULEBOOK_COLUMNS = frozenset({"guardrail", "criticality", "description"})
+OPTIONAL_RULEBOOK_COLUMNS = frozenset({"guardrail", "criticality", "description", "sprint"})
 
 #: Criticality values that hold a place rather than give a level.
 CRITICALITY_PLACEHOLDERS = frozenset({"pending dq input"})
@@ -137,10 +147,10 @@ CRITICALITY_PLACEHOLDERS = frozenset({"pending dq input"})
 DGE_GUARDRAIL = {
     "completeness": 0.95,
     "consistency": 0.95,
-    "timeliness": 0.90,
-    "accuracy": 0.90,
-    "uniqueness": 1.00,
-    "validity": 1.00,
+    "timeliness": 0.95,
+    "accuracy": 0.95,
+    "uniqueness": 0.95,
+    "validity": 0.95,
 }
 
 #: The rulebook's lifecycle statuses in the toolkit's vocabulary (Draft,
@@ -212,7 +222,11 @@ CONSTANTS = {
 FROM_RULEBOOK = ("Rule_ID", "Attribute_ID", "Lifecycle", "Criticality")
 
 #: Gaps workbook columns added after the submission's own.
-GAP_COLUMNS = ("Reason", "Same-name rulebook rule", "Its technical id")
+GAP_COLUMNS = ("Sprint", "Reason", "Same-name rulebook rule", "Its technical id")
+
+#: The record key holding the rule's sprint; not an output column. The
+#: rulebook's sprint, or the log's for a rule the rulebook does not know.
+SPRINT = "_sprint"
 
 
 def collapse(header: object) -> str:
@@ -246,6 +260,8 @@ class RulebookEntry:
     expression: str | None
     description: str | None
     name: str
+    #: `Sprint 3` and the like, as the rulebook writes it.
+    sprint: str | None = None
     #: (layer, technical id as the rulebook writes it) per layer.
     technical_ids: tuple[tuple[str, str], ...] = ()
 
@@ -346,6 +362,7 @@ def load_rulebook(path: Path) -> Rulebook:
                 expression=text(cell(row, "expression")) or None,
                 description=text(cell(row, "description")) or None,
                 name=text(cell(row, "name")),
+                sprint=text(cell(row, "sprint")) or None,
                 technical_ids=tuple(
                     (layer, text(row[position[header]])) for layer, header in TECHNICAL_ID.items()
                 ),
@@ -408,11 +425,22 @@ def toolkit_lifecycle(status: str | None) -> str | None:
     return LIFECYCLE.get(re.match(r"[a-z]*", status.lower()).group(), status)
 
 
+def log_sheet(names: list[str]) -> str:
+    """The log's sheet: `execution_log`, or the one sheet whose name holds
+    it - exports arrive as `20261022execution_log` and the like."""
+    if LOG_SHEET in names:
+        return LOG_SHEET
+    candidates = [n for n in names if LOG_SHEET in n.lower()]
+    if len(candidates) == 1:
+        return candidates[0]
+    raise ValueError(f"no single '{LOG_SHEET}' sheet among {names}")
+
+
 def load_log(path: Path) -> list[dict[str, object]]:
     """Every execution log row, keyed by header."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        rows = wb[LOG_SHEET].iter_rows(values_only=True)
+        rows = wb[log_sheet(wb.sheetnames)].iter_rows(values_only=True)
         headers = [collapse(h) for h in next(rows)]
         return [dict(zip(headers, row)) for row in rows if any(v is not None for v in row)]
     finally:
@@ -491,13 +519,18 @@ def to_record(row: dict[str, object], entry: RulebookEntry | None, dataset_table
     record["Technical Description"] = (
         text(row["Rule_Expression_Logic"]) or (entry.expression if entry else None) or None
     )
+    # The dimension is the rulebook's; the log's is the fallback.
+    record["DQ_Dimension"] = (
+        (entry.dimension if entry else None) or text(row["Data_Quality_Dimension"]) or None
+    )
     record["Data Table ID"] = (entry.table_id if entry else None) or dataset_table
     record["HierarchicalPath"] = hierarchical_path(row)
+    record[SPRINT] = (entry.sprint if entry else None) or text(row.get("Sprint")) or None
 
     guardrail = entry.guardrail if entry else None
     record[ASSUMED] = guardrail is None
     if guardrail is None:
-        guardrail = DGE_GUARDRAIL.get(text(row["Data_Quality_Dimension"]).lower())
+        guardrail = DGE_GUARDRAIL.get(text(record["DQ_Dimension"]).lower())
     record["Threshold"] = guardrail
     record["Threshold Result"] = threshold_result(row["dq_score"], row["Threshold"])
 
@@ -612,7 +645,7 @@ def write_gaps(template: Path, removed: dict[str, list[dict[str, object]]],
 
 
 #: The `Layer mismatches` sheet's columns.
-MISMATCH_COLUMNS = ("Rule_ID", "Name", "DQ_Dimension", "Data Table ID", "Present in",
+MISMATCH_COLUMNS = ("Rule_ID", "Sprint", "Name", "DQ_Dimension", "Data Table ID", "Present in",
                     "Present technical id", "Present scanned time", "Missing in",
                     "Missing technical id", "Reason")
 
@@ -644,6 +677,7 @@ def layer_mismatches(submitted: dict[str, dict[str, dict[str, object]]],
                     reason = f"{missing} run not submitted: {ran[missing][missing_id.lower()]}"
                 mismatches.append({
                     "Rule_ID": rule_id,
+                    "Sprint": record[SPRINT],
                     "Name": record["Name"],
                     "DQ_Dimension": record["DQ_Dimension"],
                     "Data Table ID": record["Data Table ID"],
@@ -669,13 +703,27 @@ def gap_columns(layer: str, row: dict[str, object], reason: str,
     }
 
 
-def summarise(layer: str, records: list[dict[str, object]], removed: int, out: Path) -> None:
+def sprint_order(sprint: str | None) -> tuple[int, str]:
+    """Sprints in number order - `Sprint 10` after `Sprint 9` - unknown last."""
+    found = re.search(r"\d+", sprint or "")
+    return (int(found.group()) if found else sys.maxsize, sprint or "")
+
+
+def sprint_label(sprint: str | None) -> str:
+    """`Sprint 3` as the file name writes it: `Sprint3`."""
+    return re.sub(r"\s+", "", sprint) if sprint else "NoSprint"
+
+
+def summarise(layer: str, records: list[dict[str, object]], removed: int,
+              outputs: list[tuple[Path, int]]) -> None:
     def counts(column: str, blank: str) -> str:
         c = Counter(r[column] or blank for r in records)
         return ", ".join(f"{k} {v}" for k, v in c.most_common())
 
     batches = Counter(r["Batch_ID"] for r in records)
-    print(f"\n{layer}: {len(records)} rules -> {out}")
+    print(f"\n{layer}: {len(records)} rules")
+    for out, n in outputs:
+        print(f"  {n:>5} -> {out}")
     print(f"  Removed (no active rulebook rule): {removed}")
     print(f"  Threshold Result (vs Target): {counts('Threshold Result', '(no target)')}")
     print(f"  Threshold (DGE guardrail): {counts('Threshold', '(none)')}"
@@ -716,10 +764,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {path} not found", file=sys.stderr)
             return 1
 
-    rows = load_log(log_path)
+    try:
+        rows = load_log(log_path)
+    except ValueError as exc:
+        print(f"error: {log_path}: {exc}", file=sys.stderr)
+        return 1
     missing = check_log_columns(rows)
     if missing:
-        print(f"error: {log_path} [{LOG_SHEET}] lacks columns: {', '.join(missing)}", file=sys.stderr)
+        print(f"error: {log_path} lacks columns: {', '.join(missing)}", file=sys.stderr)
         return 1
 
     # Without the rulebook the submission is still written, its ids empty.
@@ -737,6 +789,7 @@ def main(argv: list[str] | None = None) -> int:
             "guardrail": "guardrails assumed by dimension",
             "criticality": "Criticality left empty",
             "description": "no fallback for a blank Description",
+            "sprint": "the log's sprint is used",
         }
         for key in sorted(OPTIONAL_RULEBOOK_COLUMNS - book.columns.keys()):
             print(f"warning: rulebook has no {' / '.join(RULEBOOK_COLUMNS[key])} column; "
@@ -755,6 +808,7 @@ def main(argv: list[str] | None = None) -> int:
     assumed: list[dict[str, object]] = []
     submitted: dict[str, dict[str, dict[str, object]]] = {}
     ran: dict[str, dict[str, str | None]] = {}
+    sprint_disagreements: dict[str, tuple[str, str]] = {}
     for layer in LAYERS:
         layer_rows = [r for r in rows if r["Layer"] == layer]
         if not layer_rows:
@@ -769,9 +823,12 @@ def main(argv: list[str] | None = None) -> int:
         records, removed[layer] = [], []
         for row, (entry, reason) in zip(layer_rows, lookups):
             record = to_record(row, entry, tables.get(text(row["Dataset_ID"]).lower()), args.date)
+            if entry and entry.sprint and text(row.get("Sprint")) and entry.sprint != text(row["Sprint"]):
+                sprint_disagreements[entry.rule_id] = (text(row["Sprint"]), entry.sprint)
             if reason:
                 # Without its DQO a rule cannot be submitted; it waits in the gaps.
                 record.update(gap_columns(layer, row, reason, book))
+                record["Sprint"] = record[SPRINT]
                 removed[layer].append(record)
             else:
                 records.append(record)
@@ -780,12 +837,32 @@ def main(argv: list[str] | None = None) -> int:
         ran[layer] = {text(row["Rule_ID"]).lower(): reason for row, (_, reason) in zip(layer_rows, lookups)}
         submitted[layer] = {r["Rule_ID"]: r for r in records}
 
-        out = out_dir / OUTPUT_NAME.format(date=args.date, layer=layer)
-        unknown = write_submission(template, records, out)
-        if unknown:
-            print(f"warning: template columns not filled by this script: {', '.join(unknown)}",
-                  file=sys.stderr)
-        summarise(layer, records, len(removed[layer]), out)
+    if sprint_disagreements:
+        print("warning: log and rulebook disagree on the sprint of "
+              + ", ".join(f"{dqo} (log {log}, rulebook {rb})"
+                          for dqo, (log, rb) in sorted(sprint_disagreements.items()))
+              + "; the rulebook's is used", file=sys.stderr)
+
+    # A log spanning several sprints is delivered one file per sprint and
+    # layer; both layers split by the same sprints.
+    sprints = sorted({r[SPRINT] for s in submitted.values() for r in s.values()},
+                     key=sprint_order)
+    split = len(sprints) > 1
+    for layer, by_rule in submitted.items():
+        records = list(by_rule.values())
+        outputs = []
+        for sprint in (sprints if split else [None]):
+            part = [r for r in records if not split or r[SPRINT] == sprint]
+            if not part:
+                continue
+            name = (SPRINT_OUTPUT_NAME.format(date=args.date, sprint=sprint_label(sprint), layer=layer)
+                    if split else OUTPUT_NAME.format(date=args.date, layer=layer))
+            unknown = write_submission(template, part, out_dir / name)
+            if unknown:
+                print(f"warning: template columns not filled by this script: {', '.join(unknown)}",
+                      file=sys.stderr)
+            outputs.append((out_dir / name, len(part)))
+        summarise(layer, records, len(removed[layer]), outputs)
 
     mismatches = layer_mismatches(submitted, ran, book)
     if any(removed.values()) or assumed or mismatches:
